@@ -1,0 +1,75 @@
+# Hardware values follow ur_data_collection/scripts/config/cfg.yaml.
+# Review every value on the real setup before using --execute.
+robot:
+  ip: "192.168.201.11"
+  speed: 0.10
+  acceleration: 0.10
+  payload_mass: 1.601
+  payload_cog: [0.011, -0.002, 0.052]
+  # UR TCP [x,y,z,rx,ry,rz]. Used to remove the TCP offset for tool0 uploads.
+  # If changed, also update local T_tcp_camera in hand_eye.yaml and revalidate motion offsets.
+  # Current adjusted tool0 -> gripper grasp-center distance: +Z, 140 mm.
+  tcp_offset: [0, 0, 0.140, 0, 0, 0]
+  position_tolerance_m: 0.005
+
+gripper:
+  port: "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A92ZFQC7-if00-port0"
+  init_feedback: true
+  force: 20
+  speed: 100
+  # The reference driver uses 1000=open and 0=closed.
+  open_position: 1000
+  grasp_position: 50
+  squeeze_position: 0
+  command_timeout_s: 3.0
+
+camera:
+  # Eye-in-hand RealSense serial from ur_data_collection.
+  serial: "944622073455"
+  width: 640
+  height: 480
+  fps: 15
+  warmup_frames: 30
+  timeout_ms: 5000
+
+calibration_file: "hand_eye.yaml"
+
+server:
+  # API base URL through the SSH tunnel; world is UR base.
+  url: "http://127.0.0.1:8000"
+  timeout_s: 120
+  retries: 2
+  verify_tls: true
+  bearer_token_env: LAG_API_TOKEN
+  poll_seconds: 5
+  job_timeout_s: 1800
+  download_bundle: true
+  bundle_scope: results
+  gpu: null
+  # Actual calibration used ROS tool0 = controller all-zero TCP frame.
+  # This option denotes that controller frame, not the differently oriented ROS flange link.
+  ee_frame: flange
+
+motion:
+  # Fixed downward-facing TCP orientation, UR rotation-vector representation.
+  tool_orientation_rotvec: [3.14159, 0, 0]
+  # Hard Cartesian fence in UR base coordinates (metres). Adapt to the cell.
+  workspace_min: [0.20, -0.55, 0.05]
+  workspace_max: [0.75, 0.55, 0.70]
+  transit_z_m: 0.40
+  # Offset from server's rubber-bulb point to the configured TCP grasp center.
+  grasp_offset_m: [0, 0, 0]
+  grasp_approach_m: 0.10
+  # XY/Z offset from detected mouth center; dispense_height is added afterward.
+  beaker_offset_m: [0, 0, 0]
+  dispense_height_m: 0.08
+  lift_after_titration_m: 0.10
+  settle_s: 0.5
+  grasp_settle_s: 1.0
+  squeeze_hold_s: 0.5
+  squeeze_cycles: 1
+  min_confidence: 0.70
+
+data:
+  save_capture: true
+  output_dir: "../captures"

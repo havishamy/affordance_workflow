@@ -1,0 +1,9 @@
+numpy>=1.24
+opencv-python>=4.8
+PyYAML>=6.0
+requests>=2.31
+pyrealsense2>=2.55,<2.57
+ur-rtde>=1.5
+pyserial>=3.5
+crcmod>=1.7
+# pyDHgripper must be installed from the same source/environment used by ur_data_collection.
