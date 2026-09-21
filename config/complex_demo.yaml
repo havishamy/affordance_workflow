@@ -1,0 +1,84 @@
+# This is a separate experiment. It reads the existing hardware/server config
+# but does not modify the original workflow or its configuration.
+base_config: "config.yaml"
+api_path: "/v1/complex-demo/jobs"
+
+# Keep false until every pose/offset is measured with substitute objects and a dry run.
+physical_accuracy_validated: false
+
+stopper:
+  # Fixed TCP orientation for grasping the stopper (UR rotation vector).
+  orientation_rotvec: [3.14159, 0, 0]
+  grasp_offset_m: [0, 0, 0]
+  approach_m: 0.08
+  pull_distance_m: 0.10
+  gripper_position: 80
+  # Required stopper parking pose [x,y,z,rx,ry,rz] in UR base.
+  # This is a placeholder and MUST be measured in the real cell.
+  parking_pose: [0.35, 0.30, 0.15, 3.14159, 0, 0]
+  parking_approach_m: 0.08
+
+bottle:
+  orientation_rotvec: [3.14159, 0, 0]
+  grasp_offset_m: [0, 0, 0]
+  approach_m: 0.10
+  lift_m: 0.12
+  gripper_position: 120
+  # Added to the beaker-mouth target in UR base coordinates.
+  pour_target_offset_m: [0, 0, 0]
+  mouth_clearance_m: 0.08
+  # Tilt is composed in the TCP/tool frame while keeping the detected bottle mouth fixed.
+  tilt_axis_tool: [0, 1, 0]
+  tilt_angle_deg: 100
+  tilt_steps: 10
+  hold_s: 2.0
+
+dropper:
+  orientation_rotvec: [3.14159, 0, 0]
+  grasp_offset_m: [0, 0, 0]
+  approach_m: 0.08
+  lift_m: 0.10
+  hold_position: 80
+  squeeze_position: 0
+  target_offset_m: [0, 0, 0]
+  tip_clearance_m: 0.03
+  # Open-loop squeeze count; this is not a visually verified physical drop count.
+  squeeze_cycles: 3
+  squeeze_hold_s: 0.35
+
+stir:
+  enabled: true
+  orientation_rotvec: [3.14159, 0, 0]
+  grasp_offset_m: [0, 0, 0]
+  approach_m: 0.08
+  lift_m: 0.10
+  gripper_position: 100
+  preinsert_clearance_m: 0.05
+  # Open-loop depth below the server's existing beaker-mouth affordance center.
+  # This is NOT a server-detected liquid surface.
+  target_depth_below_mouth_m: 0.03
+  radius_m: 0.015
+  turns: 2
+  points_per_turn: 24
+  point_hold_s: 0.02
+
+# These are local, object-specific geometry priors in each reconstructed
+# canonical model coordinate system. The server does not predict these values.
+# Every anchor and model ID below is a placeholder until calibrated against the
+# exact canonical models used by the server.
+geometry_priors:
+  minimum_affordance_points: 5
+  bottle_model_id: "wide_mouth_bottle_v1"
+  beaker_model_id: "beaker_v1"
+  dropper_model_id: "dropper_v1"
+  glass_rod_model_id: "glass_rod_v1"
+  bottle_axis_out_object: [0, 0, 1]
+  # Signed real-world offset from stopper affordance center toward the true mouth.
+  bottle_mouth_from_stopper_along_axis_m: -0.010
+  # Beaker mouth center comes from the server's existing mouth affordance.
+  # Axis and safe inner radius remain locally measured cell parameters.
+  beaker_axis_out_world: [0, 0, 1]
+  beaker_inner_radius_m: 0.045
+  dropper_tip_anchor_object: [0, 0, 0]
+  # The server only returns two end regions; the client assigns semantics.
+  glass_rod_grasp_end: "higher_world_z"

@@ -1,0 +1,58 @@
+{
+  "job_id": "offline-example-only",
+  "frame": "world",
+  "units": "meters",
+  "model_transform_convention": "p_world = T_world_object @ [scale * p_object, 1]",
+  "objects": {
+    "wide_mouth_bottle": {
+      "model_id": "wide_mouth_bottle_v1",
+      "T_world_object": [[1, 0, 0, 0.46], [0, 1, 0, 0.18], [0, 0, 1, 0.13], [0, 0, 0, 1]],
+      "scale": [1, 1, 1],
+      "model_points_world_artifact": "models/wide_mouth_bottle_world.ply",
+      "affordance_regions": {
+        "stopper": {
+          "points_world": [[0.458, 0.180, 0.229], [0.459, 0.181, 0.230], [0.460, 0.180, 0.231], [0.461, 0.179, 0.230], [0.462, 0.180, 0.229]]
+        },
+        "body_grasp": {
+          "points_world": [[0.458, 0.180, 0.129], [0.459, 0.181, 0.130], [0.460, 0.180, 0.131], [0.461, 0.179, 0.130], [0.462, 0.180, 0.129]]
+        }
+      }
+    },
+    "beaker": {
+      "model_id": "beaker_v1",
+      "T_world_object": [[1, 0, 0, 0.62], [0, 1, 0, -0.10], [0, 0, 1, 0.12], [0, 0, 0, 1]],
+      "scale": [1, 1, 1],
+      "model_points_world_artifact": "models/beaker_world.ply",
+      "affordance_regions": {
+        "mouth": {
+          "points_world": [[0.618, -0.100, 0.119], [0.619, -0.099, 0.120], [0.620, -0.100, 0.121], [0.621, -0.101, 0.120], [0.622, -0.100, 0.119]]
+        }
+      }
+    },
+    "dropper": {
+      "model_id": "dropper_v1",
+      "T_world_object": [[1, 0, 0, 0.55], [0, 1, 0, 0.20], [0, 0, 1, 0.08], [0, 0, 0, 1]],
+      "scale": [1, 1, 1],
+      "model_points_world_artifact": "models/dropper_world.ply",
+      "affordance_regions": {
+        "bulb": {
+          "points_world": [[0.548, 0.200, 0.179], [0.549, 0.201, 0.180], [0.550, 0.200, 0.181], [0.551, 0.199, 0.180], [0.552, 0.200, 0.179]]
+        }
+      }
+    },
+    "glass_rod": {
+      "model_id": "glass_rod_v1",
+      "T_world_object": [[1, 0, 0, 0.34], [0, 1, 0, -0.20], [0, 0, 1, 0.07], [0, 0, 0, 1]],
+      "scale": [1, 1, 1],
+      "model_points_world_artifact": "models/glass_rod_world.ply",
+      "affordance_regions": {
+        "end_a": {
+          "points_world": [[0.339, -0.200, 0.199], [0.340, -0.201, 0.200], [0.341, -0.200, 0.201], [0.340, -0.199, 0.200], [0.340, -0.200, 0.200]]
+        },
+        "end_b": {
+          "points_world": [[0.339, -0.200, 0.069], [0.340, -0.201, 0.070], [0.341, -0.200, 0.071], [0.340, -0.199, 0.070], [0.340, -0.200, 0.070]]
+        }
+      }
+    }
+  }
+}
