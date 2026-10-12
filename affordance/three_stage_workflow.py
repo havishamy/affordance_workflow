@@ -18,7 +18,8 @@ from .three_stage_config import ThreeStageConfig
 from .three_stage_result import SceneGeometry, _read_ply_xyz, load_scene
 
 LOG = logging.getLogger(__name__)
-STAGES = ("stopper", "bottle", "dropper")
+CHEMISTRY_STAGES = ("stopper", "bottle", "dropper")
+STAGES = (*CHEMISTRY_STAGES, "stirring")
 
 
 @dataclass(frozen=True)
@@ -146,7 +147,7 @@ class ThreeStageWorkflow:
     def plan_all(self, scene: SceneGeometry, initial_pose: Sequence[float]) -> tuple[StagePlan, ...]:
         pose = tuple(initial_pose)
         stages: list[StagePlan] = []
-        for name in STAGES:
+        for name in CHEMISTRY_STAGES:
             plan = self.plan_stage(name, scene, pose)
             stages.append(plan)
             pose = plan.last_pose
@@ -422,7 +423,9 @@ class ThreeStageWorkflow:
             raise RuntimeError("physical_execution_validated is false; refusing to connect to robot.")
         if not self.config.base.calibration.validated:
             raise RuntimeError("Hand-eye calibration is not validated; refusing to connect to robot.")
-        if tuple(stage_names) != STAGES and not (len(stage_names) == 1 and stage_names[0] in STAGES):
+        if tuple(stage_names) != CHEMISTRY_STAGES and not (
+            len(stage_names) == 1 and stage_names[0] in CHEMISTRY_STAGES
+        ):
             raise ValueError("Select all three stages in order, or exactly one stage.")
         # A low transit height can turn the first horizontal move from an
         # arbitrary start pose into a sweep through the saved scene. This is

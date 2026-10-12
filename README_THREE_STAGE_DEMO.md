@@ -1,6 +1,6 @@
-# 本次采集的三阶段真机实验：拔塞、倾倒、滴液
+# 四阶段真机实验：拔塞、倾倒、滴液、玻璃棒搅拌
 
-本流程只新增/修改独立三阶段文件，不修改旧 `run_titration.py`、旧 `affordance/workflow.py` 或旧实验流程。入口为 `run_three_stage_demo.py`。默认读取已经完成的 `20260921_171530_302852` 解算结果；打开观测开关后，会重新移动到参考观察位姿、拍照并请求服务器。
+为兼容已有现场命令，入口和配置文件仍保留 `run_three_stage_demo.py`、`three_stage_demo.yaml` 名称；流程现已扩展为四阶段。旧 `run_titration.py` 和旧 `affordance/workflow.py` 不受影响。
 
 采集时的 TCP offset 为 `[0,0,0.140,0,0,0]`。现场当前 offset 可以不同，程序不再要求两者相等：服务器结果是 UR base 中的物体坐标，执行时会使用**当前实际 TCP 位姿**重新规划。但这要求当前设置的 TCP 确实对应实际夹爪夹持中心；若只是修改数字而夹持中心未变，抓取会出现对应偏差。离线路径的首段仍用历史拍照位姿作预览，执行前另存的 `plan_<stage>.json` 才是从当前位姿生成的动作计划。
 
@@ -71,11 +71,67 @@ captures/20260921_171530_302852/complex_server_result_with_beaker/
     local_three_stage_plan.json
 ```
 
-三个阶段的顺序：
+四个阶段的顺序：
 
 1. `stopper`：打开夹爪、抬到安全高度、从上方接近瓶塞、夹持、竖直拔出、移到实测停车位并放下。
 2. `bottle`：从上方接近并横向夹住瓶身、提起、到烧杯侧上方、分步倾斜并降低瓶口、等待倾倒、抬高恢复、放回原位置。
 3. `dropper`：抓胶头、竖直抽出滴管、移到烧杯接液中心上方、按配置挤压、回到原瓶并松爪。
+4. `stirring`：滴管归位后重新移动到观察位，调用 `/v1/stirring/jobs` 定位平放玻璃棒两端；人工核对叠加图后，从两个对称候选中进行工作空间和 UR 控制器 IK/关节限位筛选，从上方抓住一端，在安全高度将自由端调整为竖直向下，移动到原 complex-demo 烧杯口上方，浅插入并执行低速圆周搅拌，最后退出并放回原位。
+
+## 第四阶段的独立感知
+
+玻璃棒不能复用初始 complex-demo 图像。完整 `--stage all` 会在前三阶段和滴管归位后，自动重新拍摄并请求 CPU 路由 `/v1/stirring/jobs`。该接口只提供玻璃棒端点、轴线和两个抓取候选；本地不会把它当成可直接执行的六自由度抓取姿态。
+
+首次只做玻璃棒观察和结果下载：
+
+```bash
+export LAG_API_TOKEN='与服务器一致的密钥'
+python run_three_stage_demo.py --observe 0 --stage stirring --stir-observe 1
+```
+
+这条命令会移动到最终观察位，但不会抓取。`--stir-observe 1` 本身作为观察移动授权，不再额外要求键盘输入；下载后终端会打印 `glass_rod/geometry_overlay.png` 路径供核查。质量阈值、结果 schema、单位、坐标系、端点一致性、手眼组合矩阵和全部声明的调试图仍为硬校验；失败时不会使用旧玻璃棒结果继续。
+
+复用最近一次与当前烧杯 complex-demo job 严格匹配的玻璃棒结果：
+
+```bash
+python run_three_stage_demo.py --observe 0 --stage stirring --stir-observe 0
+```
+
+完整四阶段命令保持为：
+
+```bash
+python run_three_stage_demo.py --observe 1 --execute --stage all
+```
+
+第四阶段分开执行：
+
+```bash
+python run_three_stage_demo.py --observe 0 --stage stirring --stir-observe 1 --execute
+```
+
+不要对单独的 `stirring` 阶段使用 `--observe 1`：瓶塞已经移走后，完整 complex-demo 初始场景不再成立。
+
+## 搅拌参数闸门
+
+`config/three_stage_demo.yaml` 中 `stirring_motion.validated` 默认是 `false`，所有必须实测的长度保持 `null`。这会阻止第四阶段真机动作，也会在完整 `--stage all --execute` 的前三阶段动作开始前停止。必须现场测量并填写：
+
+- `pregrasp_height_m`：桌面上方预抓取高度；
+- `lift_height_m`：长棒调姿时的提升距离；
+- `preinsert_clearance_m`：自由端在杯口上方的净空；
+- `target_depth_below_mouth_m`：自由端低于杯口的搅拌深度；
+- `stir_radius_m`、`stir_speed_mps`、圈数和每圈采样点；
+- `beaker_safe_inner_radius_m`：考虑杯壁厚度后的真实安全内半径；
+- `bottom_clearance_m`：自由端距离真实杯底的安全间距（服务器不定位杯底，仍需人工确认）；
+- `rod_grasp_center_tool_m`：从当前 TCP 原点到被夹住玻璃棒中心线的实测三维向量，即本地 `T_tool_rod` 的平移部分；
+- `rod_grasp_position`、`rod_grasp_force` 和夹爪闭合轴约定。
+
+必须满足：
+
+```text
+stir_radius + endpoint_uncertainty + rod_radius < beaker_safe_inner_radius
+```
+
+代码会逐路点检查 Cartesian 工作空间，并在真机连接后让 UR 控制器检查 IK 和关节安全限位；仓库仍没有完整的机械臂、相机、线缆和环境碰撞模型。第四阶段只保留两个人工键入点：TCP 已下降到玻璃棒最低抓取点、夹爪尚未闭合时；玻璃棒自由端已经对准烧杯口、尚未插入时。观察移动和服务器几何叠加图只打印提示，不再阻塞。首轮必须使用空烧杯和低速验证。
 
 真机模式只能在现场参数验证后使用：
 

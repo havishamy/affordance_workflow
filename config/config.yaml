@@ -54,7 +54,10 @@ motion:
   # Fixed downward-facing TCP orientation, UR rotation-vector representation.
   tool_orientation_rotvec: [3.14159, 0, 0]
   # Hard Cartesian fence in UR base coordinates (metres). Adapt to the cell.
-  workspace_min: [0.20, -0.55, 0.03]
+  # Glass-rod TCP is deliberately commanded 5 mm below the reconstructed
+  # centerline after the real pregrasp test showed a high grasp. Keep this
+  # lower fence scoped by the remaining XYZ workspace checks and checkpoints.
+  workspace_min: [0.20, -0.55, 0.015]
   workspace_max: [0.75, 0.55, 0.70]
   transit_z_m: 0.274
   # Offset from server's rubber-bulb point to the configured TCP grasp center.

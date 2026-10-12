@@ -92,3 +92,54 @@ dropper:
   squeeze_cycles: 1
   squeeze_hold_s: 0.5
   settle_s: 0.8
+
+# CPU glass-rod endpoint service. These values define the request and hard
+# result-quality gates; measure the actual rod before setting motion.validated.
+stirring_perception:
+  rod_radius_m: 0.0025
+  grasp_inset_m: 0.025
+  min_length_m: 0.08
+  max_length_m: 0.40
+  min_segmentation_confidence: 0.50
+  min_mask_elongation: 6.0
+  min_table_plane_inlier_fraction: 0.75
+  max_table_plane_rmse_m: 0.004
+  # A 10 mm stir radius is allowed only when endpoint uncertainty stays under
+  # 5 mm; the latest server result is about 2.74 mm.
+  max_endpoint_uncertainty_m: 0.005
+  expected_rod_length_m: 0.196
+  rod_length_tolerance_m: 0.020
+  latest_result_manifest: "../captures/stirring_latest_result.json"
+
+# Fourth-stage execution refuses hardware while validated=false. The current
+# true value is an operator-controlled assertion and still requires empty-cup,
+# low-speed, checkpoint-by-checkpoint verification of the estimates below.
+stirring_motion:
+  validated: true
+  # Conservative initial values for the current 197 mm rod and ~25.5 mm rim.
+  # Verify each value with an empty beaker before accepting every checkpoint.
+  pregrasp_height_m: 0.060
+  lift_height_m: 0.230
+  preinsert_clearance_m: 0.040
+  # Total depth below the mouth. 0.080 m would put the estimated tip below the
+  # fitted beaker bottom, so use 0.060 m total rather than adding 0.060 m.
+  target_depth_below_mouth_m: 0.060
+  stir_radius_m: 0.01
+  stir_cycles: 1
+  stir_points_per_cycle: 36
+  stir_speed_mps: 0.015
+  beaker_safe_inner_radius_m: 0.020
+  bottom_clearance_m: 0.015
+  rod_grasp_position: 20
+  rod_grasp_force: 20
+  # Measured vector from configured TCP origin to the held rod centerline,
+  # expressed in the TCP frame at grasp. This defines T_tool_rod translation.
+  # Empirical correction from the pregrasp test: command TCP 5 mm lower than
+  # the reconstructed rod center. With tool +Z pointing down during grasp,
+  # the held rod center is therefore at tool Z=-5 mm relative to the TCP.
+  rod_grasp_center_tool_m: [0, 0, -0.005]
+  # Physical PGE jaw-closing axis expressed in the configured TCP frame.
+  # Verify this convention on the real gripper before enabling motion.
+  closing_axis_tool: [1, 0, 0]
+  orientation_steps: 12
+  settle_s: 1.0

@@ -18,6 +18,21 @@ def _values(raw: Any, count: int, name: str) -> tuple[float, ...]:
     return values
 
 
+def _optional_float(raw: Any, name: str) -> float | None:
+    if raw is None:
+        return None
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite when configured.")
+    return value
+
+
+def _optional_values(raw: Any, count: int, name: str) -> tuple[float, ...] | None:
+    if raw is None:
+        return None
+    return _values(raw, count, name)
+
+
 @dataclass(frozen=True)
 class ResultQualityConfig:
     minimum_region_points: int
@@ -88,6 +103,43 @@ class ObservationConfig:
 
 
 @dataclass(frozen=True)
+class StirringPerceptionConfig:
+    rod_radius_m: float
+    grasp_inset_m: float
+    min_length_m: float
+    max_length_m: float
+    min_segmentation_confidence: float
+    min_mask_elongation: float
+    min_table_plane_inlier_fraction: float
+    max_table_plane_rmse_m: float
+    max_endpoint_uncertainty_m: float
+    expected_rod_length_m: float
+    rod_length_tolerance_m: float
+    latest_result_manifest: Path
+
+
+@dataclass(frozen=True)
+class StirringMotionConfig:
+    validated: bool
+    pregrasp_height_m: float | None
+    lift_height_m: float | None
+    preinsert_clearance_m: float | None
+    target_depth_below_mouth_m: float | None
+    stir_radius_m: float | None
+    stir_cycles: int
+    stir_points_per_cycle: int
+    stir_speed_mps: float | None
+    beaker_safe_inner_radius_m: float | None
+    bottom_clearance_m: float | None
+    rod_grasp_position: int
+    rod_grasp_force: int
+    rod_grasp_center_tool_m: tuple[float, float, float] | None
+    closing_axis_tool: tuple[float, float, float]
+    orientation_steps: int
+    settle_s: float
+
+
+@dataclass(frozen=True)
 class ThreeStageConfig:
     base: AppConfig
     capture_dir: Path
@@ -100,6 +152,8 @@ class ThreeStageConfig:
     stopper: StopperStageConfig
     bottle: BottleStageConfig
     dropper: DropperStageConfig
+    stirring_perception: StirringPerceptionConfig
+    stirring_motion: StirringMotionConfig
 
     @classmethod
     def load(cls, path: str | Path) -> "ThreeStageConfig":
@@ -107,7 +161,7 @@ class ThreeStageConfig:
         with config_path.open("r", encoding="utf-8") as handle:
             raw = yaml.safe_load(handle)
         if not isinstance(raw, dict):
-            raise ValueError("Three-stage configuration must contain a mapping.")
+            raise ValueError("Four-stage configuration must contain a mapping (legacy three_stage filename is supported).")
         base_path = Path(raw.get("base_config", "config.yaml")).expanduser()
         if not base_path.is_absolute():
             base_path = config_path.parent / base_path
@@ -133,6 +187,8 @@ class ThreeStageConfig:
         stopper = raw["stopper"]
         bottle = raw["bottle"]
         dropper = raw["dropper"]
+        stirring_perception = raw["stirring_perception"]
+        stirring_motion = raw["stirring_motion"]
         result = cls(
             base=base,
             capture_dir=resolve(raw["capture_dir"]),
@@ -203,6 +259,74 @@ class ThreeStageConfig:
                 squeeze_hold_s=float(dropper.get("squeeze_hold_s", 0.5)),
                 settle_s=float(dropper.get("settle_s", 0.8)),
             ),
+            stirring_perception=StirringPerceptionConfig(
+                rod_radius_m=float(stirring_perception.get("rod_radius_m", 0.0025)),
+                grasp_inset_m=float(stirring_perception.get("grasp_inset_m", 0.025)),
+                min_length_m=float(stirring_perception.get("min_length_m", 0.08)),
+                max_length_m=float(stirring_perception.get("max_length_m", 0.40)),
+                min_segmentation_confidence=float(stirring_perception.get("min_segmentation_confidence", 0.50)),
+                min_mask_elongation=float(stirring_perception.get("min_mask_elongation", 6.0)),
+                min_table_plane_inlier_fraction=float(
+                    stirring_perception.get("min_table_plane_inlier_fraction", 0.75)
+                ),
+                max_table_plane_rmse_m=float(stirring_perception.get("max_table_plane_rmse_m", 0.004)),
+                max_endpoint_uncertainty_m=float(
+                    stirring_perception.get("max_endpoint_uncertainty_m", 0.010)
+                ),
+                expected_rod_length_m=float(stirring_perception["expected_rod_length_m"]),
+                rod_length_tolerance_m=float(stirring_perception["rod_length_tolerance_m"]),
+                latest_result_manifest=resolve(
+                    stirring_perception.get(
+                        "latest_result_manifest", str(base.output_dir / "stirring_latest_result.json")
+                    )
+                ),
+            ),
+            stirring_motion=StirringMotionConfig(
+                validated=bool(stirring_motion.get("validated", False)),
+                pregrasp_height_m=_optional_float(
+                    stirring_motion.get("pregrasp_height_m"), "stirring_motion.pregrasp_height_m"
+                ),
+                lift_height_m=_optional_float(
+                    stirring_motion.get("lift_height_m"), "stirring_motion.lift_height_m"
+                ),
+                preinsert_clearance_m=_optional_float(
+                    stirring_motion.get("preinsert_clearance_m"),
+                    "stirring_motion.preinsert_clearance_m",
+                ),
+                target_depth_below_mouth_m=_optional_float(
+                    stirring_motion.get("target_depth_below_mouth_m"),
+                    "stirring_motion.target_depth_below_mouth_m",
+                ),
+                stir_radius_m=_optional_float(
+                    stirring_motion.get("stir_radius_m"), "stirring_motion.stir_radius_m"
+                ),
+                stir_cycles=int(stirring_motion.get("stir_cycles", 1)),
+                stir_points_per_cycle=int(stirring_motion.get("stir_points_per_cycle", 24)),
+                stir_speed_mps=_optional_float(
+                    stirring_motion.get("stir_speed_mps"), "stirring_motion.stir_speed_mps"
+                ),
+                beaker_safe_inner_radius_m=_optional_float(
+                    stirring_motion.get("beaker_safe_inner_radius_m"),
+                    "stirring_motion.beaker_safe_inner_radius_m",
+                ),
+                bottom_clearance_m=_optional_float(
+                    stirring_motion.get("bottom_clearance_m"), "stirring_motion.bottom_clearance_m"
+                ),
+                rod_grasp_position=int(stirring_motion.get("rod_grasp_position", 50)),
+                rod_grasp_force=int(stirring_motion.get("rod_grasp_force", base.gripper.force)),
+                rod_grasp_center_tool_m=_optional_values(
+                    stirring_motion.get("rod_grasp_center_tool_m"),
+                    3,
+                    "stirring_motion.rod_grasp_center_tool_m",
+                ),
+                closing_axis_tool=_values(
+                    stirring_motion.get("closing_axis_tool", [1, 0, 0]),
+                    3,
+                    "stirring_motion.closing_axis_tool",
+                ),
+                orientation_steps=int(stirring_motion.get("orientation_steps", 8)),
+                settle_s=float(stirring_motion.get("settle_s", 0.8)),
+            ),
         )
         result.validate()
         return result
@@ -233,7 +357,7 @@ class ThreeStageConfig:
         if self.dropper.tip_below_bulb_m + self.dropper.grasp_offset_z_m <= 0:
             raise ValueError("Dropper tip must remain below the shifted grasp center.")
         if self.base.robot.speed > 0.2 or self.base.robot.acceleration > 0.2:
-            raise ValueError("Three-stage experiment caps RTDE speed/acceleration at 0.2.")
+            raise ValueError("Four-stage experiment caps RTDE speed/acceleration at 0.2.")
         for name, value in (
             ("stopper.gripper_position", self.stopper.gripper_position),
             ("bottle.gripper_position", self.bottle.gripper_position),
@@ -263,3 +387,64 @@ class ThreeStageConfig:
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive.")
+
+        perception = self.stirring_perception
+        positive_perception = (
+            perception.rod_radius_m, perception.grasp_inset_m, perception.min_length_m,
+            perception.max_length_m, perception.min_mask_elongation,
+            perception.max_table_plane_rmse_m, perception.max_endpoint_uncertainty_m,
+            perception.expected_rod_length_m, perception.rod_length_tolerance_m,
+        )
+        if any(not math.isfinite(value) or value <= 0 for value in positive_perception):
+            raise ValueError("Stirring perception distances and quality thresholds must be finite and positive.")
+        if perception.min_length_m >= perception.max_length_m:
+            raise ValueError("stirring_perception min_length_m must be below max_length_m.")
+        for name, value in (
+            ("min_segmentation_confidence", perception.min_segmentation_confidence),
+            ("min_table_plane_inlier_fraction", perception.min_table_plane_inlier_fraction),
+        ):
+            if not 0 <= value <= 1:
+                raise ValueError(f"stirring_perception.{name} must be in [0, 1].")
+
+        motion = self.stirring_motion
+        if not 0 <= motion.rod_grasp_position <= 1000:
+            raise ValueError("stirring_motion.rod_grasp_position must be within [0, 1000].")
+        if not 0 <= motion.rod_grasp_force <= 100:
+            raise ValueError("stirring_motion.rod_grasp_force must be within [0, 100].")
+        if motion.rod_grasp_position >= self.base.gripper.open_position:
+            raise ValueError("Stirring grasp position must be more closed than open_position.")
+        closing_axis = np.asarray(motion.closing_axis_tool)
+        if not math.isclose(float(np.linalg.norm(closing_axis)), 1.0, abs_tol=1e-6):
+            raise ValueError("stirring_motion.closing_axis_tool must be a unit vector.")
+        if abs(float(closing_axis[2])) > 1e-6:
+            raise ValueError("stirring_motion.closing_axis_tool must be perpendicular to tool Z.")
+        if motion.orientation_steps < 2 or motion.stir_cycles < 1 or motion.stir_points_per_cycle < 8:
+            raise ValueError("Stirring orientation/cycle sampling is too small.")
+        if not math.isfinite(motion.settle_s) or motion.settle_s < 0:
+            raise ValueError("stirring_motion.settle_s must be finite and nonnegative.")
+        measured = {
+            "pregrasp_height_m": motion.pregrasp_height_m,
+            "lift_height_m": motion.lift_height_m,
+            "preinsert_clearance_m": motion.preinsert_clearance_m,
+            "target_depth_below_mouth_m": motion.target_depth_below_mouth_m,
+            "stir_radius_m": motion.stir_radius_m,
+            "stir_speed_mps": motion.stir_speed_mps,
+            "beaker_safe_inner_radius_m": motion.beaker_safe_inner_radius_m,
+            "bottom_clearance_m": motion.bottom_clearance_m,
+        }
+        if motion.validated:
+            missing = [name for name, value in measured.items() if value is None]
+            if motion.rod_grasp_center_tool_m is None:
+                missing.append("rod_grasp_center_tool_m")
+            if missing:
+                raise ValueError(f"Validated stirring motion is missing measured values: {missing}")
+        for name, value in measured.items():
+            if value is not None and value <= 0:
+                raise ValueError(f"stirring_motion.{name} must be positive when configured.")
+        if all(value is not None for value in (
+            motion.stir_radius_m, motion.beaker_safe_inner_radius_m,
+        )) and (
+            motion.stir_radius_m + perception.max_endpoint_uncertainty_m + perception.rod_radius_m
+            >= motion.beaker_safe_inner_radius_m
+        ):
+            raise ValueError("Configured stirring radius violates the beaker inner-radius uncertainty margin.")

@@ -10,7 +10,7 @@ import numpy as np
 from affordance.geometry import rotvec_to_matrix
 from affordance.three_stage_config import ThreeStageConfig
 from affordance.three_stage_result import _circle_from_partial_rim, load_scene
-from affordance.three_stage_workflow import STAGES, ThreeStageWorkflow
+from affordance.three_stage_workflow import CHEMISTRY_STAGES, STAGES, ThreeStageWorkflow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +45,8 @@ class ThreeStageTests(unittest.TestCase):
         robot, gripper = Mock(), Mock()
         workflow = ThreeStageWorkflow(self.config, robot=robot, gripper=gripper)
         plans = workflow.plan_all(self.scene, workflow.captured_tcp_pose())
-        self.assertEqual(tuple(plan.name for plan in plans), STAGES)
+        self.assertEqual(STAGES, (*CHEMISTRY_STAGES, "stirring"))
+        self.assertEqual(tuple(plan.name for plan in plans), CHEMISTRY_STAGES)
         self.assertEqual([sum(step.kind == "moveL" for step in plan.steps) for plan in plans], [10, 45, 15])
         self.assertEqual(sum(step.name.startswith("squeeze_") for step in plans[2].steps), 1)
         robot.connect.assert_not_called()

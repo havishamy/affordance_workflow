@@ -51,12 +51,18 @@ class URRobot:
         if hasattr(self.receive, "isEmergencyStopped") and self.receive.isEmergencyStopped():
             raise RuntimeError("UR is emergency-stopped; refusing motion.")
 
-    def move_linear(self, pose: Sequence[float]) -> None:
+    def move_linear(
+        self, pose: Sequence[float], speed: float | None = None, acceleration: float | None = None,
+    ) -> None:
         if self.control is None:
             raise RuntimeError("Robot is not connected.")
         target = [float(v) for v in pose]
         self.assert_motion_ready()
-        result = self.control.moveL(target, self.config.speed, self.config.acceleration)
+        selected_speed = self.config.speed if speed is None else float(speed)
+        selected_acceleration = self.config.acceleration if acceleration is None else float(acceleration)
+        if not 0 < selected_speed <= 0.2 or not 0 < selected_acceleration <= 0.2:
+            raise ValueError("UR Cartesian speed and acceleration must be in (0, 0.2].")
+        result = self.control.moveL(target, selected_speed, selected_acceleration)
         if isinstance(result, (bool, np.bool_)) and not bool(result):
             raise RuntimeError(f"UR moveL failed for target {target}.")
         actual = np.asarray(self.actual_tcp_pose()[:3])
@@ -65,6 +71,24 @@ class URRobot:
             raise RuntimeError(
                 f"UR stopped {error:.4f} m from target (limit {self.config.position_tolerance_m:.4f} m)."
             )
+
+    def has_inverse_kinematics(self, pose: Sequence[float]) -> bool:
+        if self.control is None:
+            raise RuntimeError("Robot is not connected.")
+        return bool(self.control.getInverseKinematicsHasSolution([float(value) for value in pose]))
+
+    def inverse_kinematics(self, pose: Sequence[float]) -> list[float]:
+        if self.control is None:
+            raise RuntimeError("Robot is not connected.")
+        joints = [float(value) for value in self.control.getInverseKinematics([float(value) for value in pose])]
+        if len(joints) != 6 or not np.all(np.isfinite(joints)):
+            raise RuntimeError("UR controller did not return a valid six-joint IK solution.")
+        return joints
+
+    def joints_within_safety_limits(self, joints: Sequence[float]) -> bool:
+        if self.control is None:
+            raise RuntimeError("Robot is not connected.")
+        return bool(self.control.isJointsWithinSafetyLimits([float(value) for value in joints]))
 
     def stop(self) -> None:
         if self.control is not None:
@@ -133,6 +157,13 @@ class DHGripper:
             time.sleep(0.05)
         # Do not falsely claim exact contact: allow motion time, then continue.
         time.sleep(min(0.5, self.config.command_timeout_s))
+
+    def set_force(self, force: int) -> None:
+        if self.device is None:
+            raise RuntimeError("Gripper is not connected.")
+        if not 0 <= force <= 100:
+            raise ValueError("Gripper force must be within [0, 100].")
+        self.device.set_force(int(force))
 
     def open(self) -> None:
         self.set_position(self.config.open_position)
