@@ -9,7 +9,7 @@ robot:
   # UR TCP [x,y,z,rx,ry,rz]. Used to remove the TCP offset for tool0 uploads.
   # If changed, also update local T_tcp_camera in hand_eye.yaml and revalidate motion offsets.
   # Current adjusted tool0 -> gripper grasp-center distance: +Z, 140 mm.
-  tcp_offset: [0, 0, 0.140, 0, 0, 0]
+  tcp_offset: [0, 0, 0.150, 0, 0, 0]
   position_tolerance_m: 0.005
 
 gripper:
@@ -54,9 +54,9 @@ motion:
   # Fixed downward-facing TCP orientation, UR rotation-vector representation.
   tool_orientation_rotvec: [3.14159, 0, 0]
   # Hard Cartesian fence in UR base coordinates (metres). Adapt to the cell.
-  workspace_min: [0.20, -0.55, 0.05]
+  workspace_min: [0.20, -0.55, 0.03]
   workspace_max: [0.75, 0.55, 0.70]
-  transit_z_m: 0.40
+  transit_z_m: 0.274
   # Offset from server's rubber-bulb point to the configured TCP grasp center.
   grasp_offset_m: [0, 0, 0]
   grasp_approach_m: 0.10

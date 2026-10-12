@@ -1,0 +1,94 @@
+# Independent three-stage experiment. The original titration workflow/config is untouched.
+base_config: "config.yaml"
+capture_dir: "../captures/20260921_171530_302852"
+result_dir: "../captures/20260921_171530_302852/complex_server_result_with_beaker/complex_df530c2b-86be-4cc5-82b1-646908ab7886_results"
+
+# Keep false until every placeholder below has been measured with the real gripper,
+# an empty bottle/substitute liquid, and a slow stage-by-stage dry run.
+physical_execution_validated: true
+
+# 0: use the result_dir above, with no camera or server connection.
+# 1: move to the historical observation flange pose, capture RGB-D, submit to
+#    the complex-demo API, download scope=all, then plan from fresh results.
+observation:
+  enabled: 0
+  reference_capture_info: "../captures/20260921_171530_302852/capture_info.json"
+  settle_s: 0.8
+  # After a successful mode-1 run, mode 0 reuses the most recent validated result.
+  reuse_latest_result: true
+  latest_result_manifest: "../captures/three_stage_latest_result.json"
+
+robot:
+  speed: 0.05
+  acceleration: 0.05
+
+transit_z_m: 0.274
+orientation_tolerance_rad: 0.05
+
+# These image/model quality numbers are advisory warnings, not motion gates.
+# Missing/non-finite geometry and invalid coordinate transforms still abort.
+quality:
+  minimum_region_points: 100
+  minimum_silhouette_iou: 0.70
+  minimum_bottle_axis_world_z: 0.85
+  minimum_stopper_body_separation_m: 0.025
+  maximum_stopper_rms_m: 0.025
+  maximum_body_rms_m: 0.045
+  maximum_beaker_mouth_rms_m: 0.025
+  maximum_bulb_rms_m: 0.020
+  minimum_beaker_radius_m: 0.015
+  maximum_beaker_radius_m: 0.060
+  maximum_beaker_circle_residual_m: 0.003
+  minimum_beaker_arc_rad: 1.5
+
+stopper:
+  # Downward TCP: jaws close laterally around the stopper.
+  orientation_rotvec: [3.14159, 0, 0]
+  approach_m: 0.08
+  pull_distance_m: 0.10
+  # PLACEHOLDER: calibrate against the real stopper diameter.
+  gripper_position: 20
+  # PLACEHOLDER: requires an elevated stopper tray/stand at this TCP-center height.
+  place_xyz_base_m: [0.66, -0.22, 0.03]
+  place_approach_m: 0.10
+  settle_s: 0.8
+
+bottle:
+  # Selected strategy: top-down approach, lateral jaw grip on the upright body.
+  orientation_rotvec: [3.14159, 0, 0]
+  grasp_offset_along_axis_m: 0.010
+  approach_m: 0.10
+  lift_m: 0.15
+  # PLACEHOLDER: model diameter is about 55 mm; calibrate aperture and force first.
+  gripper_position: 50
+  # Signed offset from stopper-region center down the inferred bottle axis.
+  stopper_center_to_mouth_m: -0.010
+  # Put the bottle mouth on the bottle-side of the beaker center.
+  pour_side_offset_m: 0.025
+  pour_mouth_clearance_m: 0.060
+  # Tilt high above the beaker, then lower while already tilted.
+  pretilt_mouth_height_m: 0.10
+  tilt_angle_deg: 50
+  tilt_steps: 12
+  lower_steps: 4
+  hold_s: 2.0
+  restore_settle_s: 1.0
+
+dropper:
+  # Reuses the old working experiment's top-down bulb grasp semantics.
+  orientation_rotvec: [3.14159, 0, 0]
+  # Relative to the server bulb affordance center; negative Z grasps lower.
+  # Verify jaw/finger clearance to the glass bottle mouth before extracting.
+  grasp_offset_z_m: -0.010
+  approach_m: 0.08
+  extraction_m: 0.12
+  hold_position: 50
+  squeeze_position: 0
+  # PLACEHOLDER: nominal (unshifted) bulb affordance center to pipette outlet.
+  # The workflow adds grasp_offset_z_m to obtain the shifted grasp-to-tip length.
+  # The old 0.08 m TCP clearance is unsafe if the tip extends farther than that.
+  tip_below_bulb_m: 0.12
+  tip_clearance_above_beaker_m: 0.04
+  squeeze_cycles: 1
+  squeeze_hold_s: 0.5
+  settle_s: 0.8
