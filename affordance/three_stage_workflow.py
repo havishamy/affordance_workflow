@@ -16,6 +16,7 @@ from .geometry import rotvec_to_matrix
 from .hardware import DHGripper, URRobot
 from .three_stage_config import ThreeStageConfig
 from .three_stage_result import SceneGeometry, _read_ply_xyz, load_scene
+from .target_geometry import sample_opening_disk, unit_axis
 
 LOG = logging.getLogger(__name__)
 CHEMISTRY_STAGES = ("stopper", "bottle", "dropper")
@@ -85,6 +86,44 @@ def _axis_angle_rotation(axis: Sequence[float], angle: float) -> np.ndarray:
     x, y, z = axis
     skew = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]], dtype=float)
     return np.eye(3) + math.sin(angle) * skew + (1 - math.cos(angle)) * (skew @ skew)
+
+
+def _bottle_upright_rotation(
+    bottle_up: Sequence[float], pour_direction: Sequence[float], closing_axis_tool: Sequence[float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Align jaw closing with the tilt axis and keep the pour direction between the fingers."""
+    up = np.asarray(bottle_up, dtype=float)
+    up_norm = float(np.linalg.norm(up))
+    if up_norm < 1e-9:
+        raise ValueError("Bottle axis cannot be zero when choosing pour yaw.")
+    up /= up_norm
+    pour = np.asarray(pour_direction, dtype=float)
+    pour -= up * float(pour @ up)
+    pour_norm = float(np.linalg.norm(pour))
+    if pour_norm < 1e-9:
+        raise ValueError("Bottle-to-beaker direction is parallel to the bottle axis; cannot choose pour yaw.")
+    pour /= pour_norm
+
+    closing_world = np.cross(up, pour)
+    closing_world /= np.linalg.norm(closing_world)
+    closing_tool = np.asarray(closing_axis_tool, dtype=float)
+    closing_norm = float(np.linalg.norm(closing_tool))
+    if closing_norm < 1e-9:
+        raise ValueError("Gripper closing axis cannot be zero when choosing pour yaw.")
+    closing_tool /= closing_norm
+    tool_z = np.array([0.0, 0.0, 1.0])
+    pour_tool = np.cross(tool_z, closing_tool)
+    pour_tool /= np.linalg.norm(pour_tool)
+
+    # Both bases are right-handed: closing x pour = tool +Z / world down.
+    tool_basis = np.column_stack((closing_tool, pour_tool, tool_z))
+    world_basis = np.column_stack((closing_world, pour, -up))
+    rotation = world_basis @ tool_basis.T
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-6,
+    ):
+        raise ValueError("Dynamic bottle orientation is not a valid rotation.")
+    return rotation, pour, closing_world
 
 
 def _rotvec(rotation: np.ndarray) -> np.ndarray:
@@ -189,27 +228,50 @@ class ThreeStageWorkflow:
     def _plan_bottle(self, scene: SceneGeometry, current_pose: Sequence[float]) -> StagePlan:
         cfg = self.config.bottle
         warnings: list[str] = []
-        if cfg.pour_side_offset_m <= 0 or cfg.pour_side_offset_m > scene.beaker_inner_radius_estimate_m - 0.003:
+        opening = scene.quality_report.get("beaker_opening", {})
+        receiving_radius = float(opening.get("receiving_radius_m", scene.beaker_inner_radius_estimate_m - 0.003))
+        if receiving_radius <= 0:
+            raise ValueError("Beaker has no positive receiving radius after edge margin.")
+        side_offset = min(cfg.pour_side_offset_m, receiving_radius)
+        if cfg.pour_side_offset_m > receiving_radius:
             warnings.append(
-                f"Pour side offset {cfg.pour_side_offset_m:.4f} m is outside the fitted rim's "
-                f"advisory 3 mm margin (fitted radius {scene.beaker_inner_radius_estimate_m:.4f} m). "
-                "Check the actual cup and liquid landing point."
+                f"Pour side offset {cfg.pour_side_offset_m:.4f} m was limited to "
+                f"the inset receiving opening radius {receiving_radius:.4f} m."
             )
         up = scene.bottle_axis_out
         grasp = scene.bottle_body_grasp + up * cfg.grasp_offset_along_axis_m
         approach = grasp + up * cfg.approach_m
         mouth = scene.stopper_grasp + up * cfg.stopper_center_to_mouth_m
-        upright_rotation = rotvec_to_matrix(cfg.orientation_rotvec)
-        mouth_tool = upright_rotation.T @ (mouth - grasp)
 
         from_beaker_to_bottle = grasp[:2] - scene.beaker_mouth_center[:2]
-        from_beaker_to_bottle /= np.linalg.norm(from_beaker_to_bottle)
-        toward_beaker = -from_beaker_to_bottle
-        side_xy = scene.beaker_mouth_center[:2] + from_beaker_to_bottle * cfg.pour_side_offset_m
-        high_mouth = np.array([*side_xy, scene.beaker_mouth_center[2] + cfg.pretilt_mouth_height_m])
-        low_mouth = np.array([*side_xy, scene.beaker_mouth_center[2] + cfg.pour_mouth_clearance_m])
-        tilt_axis = np.cross(up, np.array([*toward_beaker, 0.0]))
-        tilt_axis /= np.linalg.norm(tilt_axis)
+        bottle_beaker_distance = float(np.linalg.norm(from_beaker_to_bottle))
+        if bottle_beaker_distance < 1e-9:
+            raise ValueError("Bottle and beaker have the same XY center; cannot choose a pour direction.")
+        from_beaker_to_bottle /= bottle_beaker_distance
+        toward_beaker_xy = -from_beaker_to_bottle
+        upright_rotation, toward_beaker, tilt_axis = _bottle_upright_rotation(
+            up, np.array([*toward_beaker_xy, 0.0]), cfg.closing_axis_tool,
+        )
+        upright_rotvec = _rotvec(upright_rotation)
+        grasp_rotvec = cfg.grasp_orientation_rotvec
+        if cfg.keep_grasp_orientation_until_tilt:
+            # Keep the proven grasp orientation through approach, grasp, lift,
+            # and transfer. Start the actual pour as a gradual tilt from this
+            # orientation instead of issuing a large standalone wrist yaw.
+            upright_rotation = rotvec_to_matrix(grasp_rotvec)
+            upright_rotvec = grasp_rotvec
+            tilt_axis = np.cross(up / np.linalg.norm(up), np.array([*toward_beaker_xy, 0.0]))
+            tilt_axis = tilt_axis / np.linalg.norm(tilt_axis)
+        mouth_tool = upright_rotation.T @ (mouth - grasp)
+        normal = unit_axis(opening.get("normal_world", [0, 0, 1]))
+        side_direction = np.array([*from_beaker_to_bottle, 0.0])
+        side_direction -= normal * float(side_direction @ normal)
+        side_direction = unit_axis(side_direction)
+        receiving_point = scene.beaker_mouth_center + side_direction * side_offset
+        # Liquid falls vertically: retain the receiving point's XY while
+        # adding world-Z clearance above its (possibly tilted) opening plane.
+        high_mouth = receiving_point + np.array([0, 0, cfg.pretilt_mouth_height_m])
+        low_mouth = receiving_point + np.array([0, 0, cfg.pour_mouth_clearance_m])
 
         def tcp_for_mouth(desired_mouth: np.ndarray, rotation: np.ndarray) -> np.ndarray:
             return desired_mouth - rotation @ mouth_tool
@@ -218,18 +280,30 @@ class ThreeStageWorkflow:
         steps: list[Step] = [
             _grip("open_before_bottle", self.config.base.gripper.open_position),
             _move("raise_for_bottle", self._transit(current_pose[:3]), current_pose[3:]),
-            _move("over_bottle", self._transit(approach), cfg.orientation_rotvec),
-            _move("bottle_approach", approach, cfg.orientation_rotvec),
-            _move("bottle_body_grasp", grasp, cfg.orientation_rotvec),
+            _move("over_bottle", self._transit(approach), grasp_rotvec),
+            _move("bottle_approach", approach, grasp_rotvec),
+            _move("bottle_body_grasp", grasp, grasp_rotvec),
             _grip("close_on_bottle", cfg.gripper_position),
             _checkpoint("check_bottle_grip_before_lift"),
-            _move("lift_bottle", grasp + up * cfg.lift_m, cfg.orientation_rotvec),
+            _move("lift_bottle", grasp + up * cfg.lift_m, grasp_rotvec),
             _checkpoint("check_bottle_clear_of_table"),
-            _move("bottle_to_transit", self._transit(grasp), cfg.orientation_rotvec),
-            _move("bottle_over_beaker_transit", self._transit(high_upright_tcp), cfg.orientation_rotvec),
-            _move("bottle_high_upright", high_upright_tcp, cfg.orientation_rotvec),
-            _checkpoint("check_high_pour_clearance"),
+            _move("bottle_to_transit", self._transit(grasp), grasp_rotvec),
         ]
+        if not cfg.keep_grasp_orientation_until_tilt:
+            grasp_rotation = rotvec_to_matrix(grasp_rotvec)
+            relative_rotvec = _rotvec(grasp_rotation.T @ upright_rotation)
+            high_grasp = self._transit(grasp)
+            for index in range(1, cfg.orientation_transition_steps + 1):
+                fraction = index / cfg.orientation_transition_steps
+                transition_rotation = grasp_rotation @ rotvec_to_matrix(relative_rotvec * fraction)
+                steps.append(_move(
+                    f"rotate_bottle_at_transit_{index:02d}", high_grasp, _rotvec(transition_rotation),
+                ))
+        steps.extend((
+            _move("bottle_over_beaker_transit", self._transit(high_upright_tcp), upright_rotvec),
+            _move("bottle_high_upright", high_upright_tcp, upright_rotvec),
+            _checkpoint("check_high_pour_clearance"),
+        ))
 
         high_tilt: list[tuple[np.ndarray, np.ndarray]] = []
         for index in range(1, cfg.tilt_steps + 1):
@@ -257,12 +331,12 @@ class ThreeStageWorkflow:
             steps.append(_move(f"restore_bottle_{index:02d}", tcp_for_mouth(high_mouth, rotation), _rotvec(rotation)))
         steps.extend((
             _wait("settle_after_restore", cfg.restore_settle_s),
-            _move("bottle_return_transit", self._transit(high_upright_tcp), cfg.orientation_rotvec),
-            _move("over_bottle_original", self._transit(approach), cfg.orientation_rotvec),
-            _move("return_bottle_approach", approach, cfg.orientation_rotvec),
-            _move("replace_bottle", grasp, cfg.orientation_rotvec),
+            _move("bottle_return_transit", self._transit(high_upright_tcp), upright_rotvec),
+            _move("over_bottle_original", self._transit(approach), upright_rotvec),
+            _move("return_bottle_approach", approach, upright_rotvec),
+            _move("replace_bottle", grasp, upright_rotvec),
             _grip("release_bottle", self.config.base.gripper.open_position),
-            _move("retreat_from_bottle", approach, cfg.orientation_rotvec),
+            _move("retreat_from_bottle", approach, upright_rotvec),
         ))
         return StagePlan("bottle", tuple(steps), tuple(warnings))
 
@@ -352,7 +426,9 @@ class ThreeStageWorkflow:
         """Report uncertain model clearances; never claim full collision safety."""
         cloud = _read_ply_xyz(self.config.result_dir / "models/wide_mouth_bottle_world.ply")
         grasp = scene.bottle_body_grasp + scene.bottle_axis_out * self.config.bottle.grasp_offset_along_axis_m
-        rotation_at_grasp = rotvec_to_matrix(self.config.bottle.orientation_rotvec)
+        grasp_step = next(step for step in plan.steps if step.name == "bottle_body_grasp")
+        assert grasp_step.pose is not None
+        rotation_at_grasp = rotvec_to_matrix(grasp_step.pose[3:])
         minimum_table_z = float(np.min(cloud[:, 2])) + 0.003
         risks: list[str] = []
         check = False
@@ -392,12 +468,27 @@ class ThreeStageWorkflow:
 
     def save_offline_plan(self, scene: SceneGeometry, plans: Sequence[StagePlan]) -> Path:
         output = self.config.result_dir / "local_three_stage_plan.json"
+        target_artifacts = {}
+        opening = scene.quality_report.get("beaker_opening")
+        if opening:
+            disk_path = self.config.result_dir / "local_beaker_opening_world.ply"
+            disk = sample_opening_disk(opening).astype("<f4")
+            header = (
+                "ply\nformat binary_little_endian 1.0\n"
+                "comment SYNTHETIC receiving free-space disk; not measured surface\n"
+                f"element vertex {len(disk)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
+            )
+            disk_path.write_bytes(header.encode("ascii") + disk.tobytes())
+            opening_path = self.config.result_dir / "local_beaker_opening.json"
+            self._write_json(opening_path, opening)
+            target_artifacts = {"synthetic_beaker_opening_ply": str(disk_path), "beaker_opening_json": str(opening_path)}
         record = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "execute": False,
             "source_capture": str(self.config.capture_dir),
             "source_result": str(self.config.result_dir / "result.json"),
-            "grasp_strategy": "top-down approach; lateral jaw closure on bottle body",
+            "grasp_strategy": "shared axial-density-mode local weighted XYZ centers; top-down lateral closure",
+            "target_artifacts": target_artifacts,
             "derived_geometry": scene.as_dict(),
             "stages": [stage.as_dict() for stage in plans],
             "warnings": [

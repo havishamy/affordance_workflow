@@ -12,7 +12,7 @@ stopper:
   grasp_offset_m: [0, 0, 0]
   approach_m: 0.08
   pull_distance_m: 0.10
-  gripper_position: 80
+  gripper_position: 920
   # Required stopper parking pose [x,y,z,rx,ry,rz] in UR base.
   # This is a placeholder and MUST be measured in the real cell.
   parking_pose: [0.35, 0.30, 0.15, 3.14159, 0, 0]
@@ -23,7 +23,7 @@ bottle:
   grasp_offset_m: [0, 0, 0]
   approach_m: 0.10
   lift_m: 0.12
-  gripper_position: 120
+  gripper_position: 880
   # Added to the beaker-mouth target in UR base coordinates.
   pour_target_offset_m: [0, 0, 0]
   mouth_clearance_m: 0.08
@@ -38,8 +38,8 @@ dropper:
   grasp_offset_m: [0, 0, 0]
   approach_m: 0.08
   lift_m: 0.10
-  hold_position: 80
-  squeeze_position: 0
+  hold_position: 920
+  squeeze_position: 1000
   target_offset_m: [0, 0, 0]
   tip_clearance_m: 0.03
   # Open-loop squeeze count; this is not a visually verified physical drop count.
@@ -52,7 +52,7 @@ stir:
   grasp_offset_m: [0, 0, 0]
   approach_m: 0.08
   lift_m: 0.10
-  gripper_position: 100
+  gripper_position: 900
   preinsert_clearance_m: 0.05
   # Open-loop depth below the server's existing beaker-mouth affordance center.
   # This is NOT a server-detected liquid surface.

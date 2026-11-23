@@ -133,17 +133,27 @@ class ThreeStageObservation:
     def _validate_observation_target(self, current: Sequence[float], target: Sequence[float]) -> list[list[float]]:
         lower = np.asarray(self.config.base.motion.workspace_min)
         upper = np.asarray(self.config.base.motion.workspace_max)
-        highest_model = max(
-            float(np.max(_read_ply_xyz(self.config.result_dir / "models" / f"{name}_world.ply")[:, 2]))
-            for name in ("wide_mouth_bottle", "beaker", "dropper")
-        )
-        required_transit = highest_model + 0.080
         self._transit_warning = None
-        if self.config.transit_z_m < required_transit:
+        model_paths = [
+            self.config.result_dir / "models" / f"{name}_world.ply"
+            for name in ("wide_mouth_bottle", "beaker", "dropper")
+        ]
+        if all(path.is_file() for path in model_paths):
+            highest_model = max(float(np.max(_read_ply_xyz(path)[:, 2])) for path in model_paths)
+            required_transit = highest_model + 0.080
+            if self.config.transit_z_m < required_transit:
+                self._transit_warning = (
+                    f"Observation transit_z_m={self.config.transit_z_m:.3f} m is below model-top+80 mm "
+                    f"advisory ({required_transit:.3f} m); inspect the physical route."
+                )
+        else:
+            missing = [str(path) for path in model_paths if not path.is_file()]
             self._transit_warning = (
-                f"Observation transit_z_m={self.config.transit_z_m:.3f} m is below model-top+80 mm "
-                f"advisory ({required_transit:.3f} m); inspect the physical route."
+                "No complete prior model clouds are available for the observation-height advisory; "
+                f"using configured transit_z_m={self.config.transit_z_m:.3f} m and hard workspace checks only. "
+                f"Missing: {missing}"
             )
+        if self._transit_warning:
             LOG.warning(self._transit_warning)
         current = np.asarray(current, dtype=float)
         target = np.asarray(target, dtype=float)

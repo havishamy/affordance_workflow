@@ -1,0 +1,24 @@
+# Direct raw-depth stopper grasp. No server or reconstructed model is used.
+three_stage_config: "three_stage_demo.yaml"
+
+# Pixel ROI [x0, y0, x1, y1] at the configured fixed observation pose.
+# It must tightly contain the white stopper top and exclude other white objects.
+roi_px: [200, 15, 275, 95]
+
+segmentation:
+  saturation_max: 80
+  value_min: 140
+  nearest_depth_percentile: 10.0
+  depth_below_percentile_m: 0.005
+  depth_above_percentile_m: 0.015
+  minimum_component_pixels: 150
+  depth_min_m: 0.25
+  depth_max_m: 0.80
+
+motion:
+  # The raw depth estimate is the visible top surface. Move 10 mm down in
+  # UR-base Z so the jaws close around the stopper side instead of its top.
+  grasp_offset_base_m: [0.0, 0.0, -0.010]
+  grasp_speed_mps: 0.02
+  grasp_acceleration_mps2: 0.02
+  settle_s: 0.8

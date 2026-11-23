@@ -10,6 +10,7 @@ import numpy as np
 
 from .geometry import validate_transform
 from .three_stage_config import ThreeStageConfig
+from .target_geometry import opening_from_model, unit_axis, weighted_modal_center
 
 LOG = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _points(value: Any, label: str, minimum: int) -> np.ndarray:
     result = np.asarray(value, dtype=float)
+    if minimum == 0 and result.size == 0:
+        result = result.reshape(0, 3)
     if result.ndim != 2 or result.shape[1:] != (3,) or len(result) < minimum:
         raise ValueError(f"{label} must contain at least {minimum} three-dimensional points.")
     if not np.all(np.isfinite(result)):
@@ -80,6 +83,24 @@ def _rms_radius(points: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.sum((points - median) ** 2, axis=1))))
 
 
+def _region_scores(root: Path, region: dict, points: np.ndarray):
+    """Only consume scores whose XYZ ordering matches the authoritative result."""
+    if "scores" in region:
+        return np.asarray(region["scores"], dtype=float)
+    artifact = region.get("points_world_npz_artifact")
+    if artifact is None:
+        return None
+    if not isinstance(artifact, str) or Path(artifact).is_absolute() or ".." in Path(artifact).parts:
+        raise ValueError("Affordance score artifact must be a safe relative NPZ path.")
+    with np.load(root / artifact, allow_pickle=False) as archive:
+        if "scores" not in archive or "points_world" not in archive:
+            raise ValueError(f"Score artifact lacks aligned points_world/scores: {artifact}")
+        saved = archive["points_world"]
+        if saved.shape != points.shape or not np.allclose(saved, points, atol=1e-6, rtol=0):
+            raise ValueError(f"Score artifact XYZ/order does not match result points: {artifact}")
+        return np.array(archive["scores"], dtype=float)
+
+
 def _circle_from_partial_rim(points: np.ndarray) -> tuple[np.ndarray, float, float, float]:
     """Fit XY circle to the returned rim arc; do not use its biased median as cup center."""
     xy = points[:, :2]
@@ -128,7 +149,8 @@ class SceneGeometry:
             "beaker_inner_radius_estimate_m": self.beaker_inner_radius_estimate_m,
             "dropper_bulb_grasp_base_m": self.dropper_bulb_grasp.tolist(),
             "quality_report": self.quality_report,
-            "method_note": "Beaker center is locally fitted to server mouth-affordance world arc; bottle mouth and tip dimensions remain unverified physical offsets.",
+            "beaker_opening": self.quality_report.get("beaker_opening"),
+            "method_note": "Grasps use axial-mode local weighting; receiving target is the hollow rim-plane opening, not cup-wall points. Mouth/tip offsets remain physical configuration.",
         }
 
 
@@ -204,34 +226,42 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
         "bulb": ("dropper", "bulb", config.quality.maximum_bulb_rms_m),
     }
     regions: dict[str, np.ndarray] = {}
+    region_scores: dict[str, np.ndarray | None] = {}
     region_quality: dict[str, Any] = {}
     for alias, (object_name, region_name, maximum_rms) in region_paths.items():
         region = objects[object_name].get("affordance_regions", {}).get(region_name)
+        receiving_surface = alias == "beaker_mouth"
+        if receiving_surface and region is None:
+            region = {}
         if not isinstance(region, dict):
             raise ValueError(f"Missing {object_name}.{region_name} affordance.")
-        # At least three beaker rim points are mathematically needed to fit a
-        # circle. Other small regions can still yield a center, with a warning.
-        points = _points(region.get("points_world"), alias, 3 if alias == "beaker_mouth" else 1)
-        if len(points) < config.quality.minimum_region_points:
+        # Wall-projected mouth points are optional diagnostics. The receiving
+        # opening is inferred from the model rim, including when this is empty.
+        points = _points(region.get("points_world", []), alias, 0 if receiving_surface else 3)
+        if not receiving_surface and len(points) < config.quality.minimum_region_points:
             warnings.append(
                 f"{alias} has {len(points)} points, below advisory support "
                 f"{config.quality.minimum_region_points}; inspect the region overlay."
             )
         artifact = region.get("points_world_artifact")
-        if not isinstance(artifact, str) or artifact.startswith("/") or ".." in Path(artifact).parts:
+        if (not receiving_surface or artifact is not None) and (
+            not isinstance(artifact, str) or artifact.startswith("/") or ".." in Path(artifact).parts
+        ):
             raise ValueError(f"{alias} has an unsafe region artifact path.")
-        if not (root / artifact).is_file():
+        if not receiving_surface and not (root / artifact).is_file():
             raise ValueError(f"Missing affordance PLY: {artifact}")
-        metrics = _read_json(root / "01_affordance" / object_name / region_name / "quality_metrics.json")
-        if metrics.get("valid") is not True:
+        metric_path = root / "01_affordance" / object_name / region_name / "quality_metrics.json"
+        metrics = _read_json(metric_path) if metric_path.is_file() or not receiving_surface else {}
+        if not receiving_surface and metrics.get("valid") is not True:
             warnings.append(f"{alias} server affordance quality flag is not valid; inspect before any motion.")
-        rms = _rms_radius(points)
-        if rms > maximum_rms:
+        rms = _rms_radius(points) if len(points) else None
+        if not receiving_surface and rms is not None and rms > maximum_rms:
             warnings.append(
                 f"{alias} region RMS radius {rms:.4f} m exceeds advisory value "
                 f"{maximum_rms:.4f} m; inspect the region overlay."
             )
         regions[alias] = points
+        region_scores[alias] = _region_scores(root, region, points) if alias != "beaker_mouth" else None
         region_quality[alias] = {
             "points": len(points), "rms_radius_m": rms,
             "argmax_uv": metrics.get("argmax_uv"), "target_peak": metrics.get("target_peak"),
@@ -241,8 +271,18 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
     separation = _read_json(separation_path) if separation_path.is_file() else {}
     if separation.get("valid") is not True or float(separation.get("top_region_iou", 1.0)) > 0.20:
         warnings.append("Stopper/body image affordances may overlap; inspect both regions before grasping.")
-    stopper_region_center = np.median(regions["stopper"], axis=0)
-    body_region_center = np.median(regions["body_grasp"], axis=0)
+    def object_axis(name):
+        direction = unit_axis(objects[name].get("main_axis_world", [0, 0, 1]))
+        return -direction if direction[2] < 0 else direction
+
+    bounds = (config.base.motion.workspace_min, config.base.motion.workspace_max)
+    centers, center_reports = {}, {}
+    for alias, name in (("stopper", "wide_mouth_bottle"), ("body_grasp", "wide_mouth_bottle"), ("bulb", "dropper")):
+        centers[alias], center_reports[alias] = weighted_modal_center(
+            regions[alias], region_scores[alias], object_axis(name),
+            config=config.grasp_center, bounds=bounds,
+        )
+    stopper_region_center, body_region_center = centers["stopper"], centers["body_grasp"]
     separation_m = float(np.linalg.norm(stopper_region_center - body_region_center))
     if separation_m < config.quality.minimum_stopper_body_separation_m:
         warnings.append(
@@ -255,17 +295,26 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
     bottle_xy = np.median(top[:, :2], axis=0)
     if np.linalg.norm(bottle_xy - stopper_region_center[:2]) > 0.025:
         warnings.append("Stopper region is over 25 mm from the reconstructed bottle-top axis.")
-    stopper_grasp = np.array([*bottle_xy, stopper_region_center[2]], dtype=float)
-    body_grasp = np.array([*bottle_xy, body_region_center[2]], dtype=float)
-    axis = stopper_grasp - body_grasp
-    axis_length = float(np.linalg.norm(axis))
-    if axis_length < 1e-9:
+    stopper_grasp = stopper_region_center
+    body_grasp = body_region_center
+    # Preserve the existing vertical extraction/pour convention. The modal
+    # estimator may use a tilted object axis, but changing surface-center XY
+    # must not silently change the commanded pulling direction.
+    axis = np.array([0.0, 0.0, 1.0])
+    if separation_m < 1e-9:
         raise ValueError("Bottle body and stopper centers coincide; no extraction axis can be constructed.")
-    axis /= axis_length
+    if float((stopper_grasp - body_grasp) @ axis) < 0:
+        axis = -axis
     if axis[2] < config.quality.minimum_bottle_axis_world_z:
         warnings.append("Bottle axis is less upright than the configured advisory value.")
 
-    beaker_center_xy, radius, circle_residual, arc_span = _circle_from_partial_rim(regions["beaker_mouth"])
+    opening = opening_from_model(
+        model_clouds["beaker"], object_axis("beaker"), config=config.beaker_opening,
+    )
+    beaker_mouth = np.asarray(opening["center_world_m"])
+    beaker_center_xy = beaker_mouth[:2]
+    radius = opening["inner_radius_estimate_m"]
+    circle_residual, arc_span = opening["residual_rms_m"], opening["arc_span_rad"]
     quality = config.quality
     if not quality.minimum_beaker_radius_m <= radius <= quality.maximum_beaker_radius_m:
         warnings.append(f"Fitted beaker mouth radius {radius:.4f} m is outside advisory bounds.")
@@ -278,21 +327,21 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
     model_xy = np.median(beaker_model[:, :2], axis=0)
     if np.linalg.norm(beaker_center_xy - model_xy) > 0.015:
         warnings.append("Fitted beaker mouth center is over 15 mm from the reconstructed beaker center.")
-    mouth_z = float(np.quantile(regions["beaker_mouth"][:, 2], 0.98))
-    beaker_mouth = np.array([*beaker_center_xy, mouth_z], dtype=float)
-
-    bulb = np.median(regions["bulb"], axis=0)
+    bulb = centers["bulb"]
     bottle_mouth = stopper_grasp + axis * config.bottle.stopper_center_to_mouth_m
     report = {
         "models": model_quality,
         "regions": region_quality,
+        "grasp_centers": center_reports,
+        "beaker_opening": opening,
         "stopper_body_center_distance_m": separation_m,
         "stopper_body_top_region_iou": separation.get("top_region_iou"),
         "beaker_circle_fit": {
             "radius_m": radius, "residual_rms_m": circle_residual,
             "arc_span_rad": arc_span,
-            "mouth_z_from_region_98th_percentile_m": mouth_z,
-            "raw_region_median_base_m": np.median(regions["beaker_mouth"], axis=0).tolist(),
+            "mouth_z_from_opening_plane_m": float(beaker_mouth[2]),
+            "method": opening["method"],
+            "raw_region_median_base_m": np.median(regions["beaker_mouth"], axis=0).tolist() if len(regions["beaker_mouth"]) else None,
         },
         "canonical_model_stability": "not guaranteed by server; no cross-capture canonical anchors used",
         "warnings": warnings,

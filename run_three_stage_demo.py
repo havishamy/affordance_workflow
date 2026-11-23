@@ -25,6 +25,11 @@ def _confirm(label: str, message: str) -> None:
         raise RuntimeError(f"Operator cancelled at {label}.")
 
 
+def _auto_confirm(label: str, message: str) -> None:
+    """Acknowledge an operator checkpoint without reading from stdin."""
+    print(f"\n{message}\n当前步骤: {label}\n--yes：自动通过，不等待键盘输入。", flush=True)
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     command.add_argument(
@@ -37,7 +42,11 @@ def parser() -> argparse.ArgumentParser:
     )
     command.add_argument(
         "--execute", action="store_true",
-        help="Execute selected stage(s) after optional observation; requires validated config and typed confirmations",
+        help="Execute selected stage(s) after optional observation; requires validated config",
+    )
+    command.add_argument(
+        "--yes", action="store_true",
+        help="Automatically accept every observation, stage and motion checkpoint without reading stdin",
     )
     command.add_argument(
         "--stir-observe", type=int, choices=(0, 1), default=None,
@@ -51,6 +60,12 @@ def main() -> int:
     args = parser().parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s %(levelname)s %(message)s")
     try:
+        confirm = _auto_confirm if args.yes else _confirm
+        if args.yes:
+            print(
+                "全自动确认模式：所有人工确认点将立即通过；自动安全校验、控制器失败、保护停止和急停仍会中止。",
+                flush=True,
+            )
         config = ThreeStageConfig.load(args.config)
         observe = config.observation.enabled if args.observe is None else args.observe
         if args.stage == "stirring" and observe == 1:
@@ -65,7 +80,7 @@ def main() -> int:
                 "观测模式=1：确认后将移动机械臂到历史观察法兰位姿、采集 RGB-D、请求服务器并下载新结果。"
                 "即使未传 --execute，此观测阶段也会运动。"
             )
-            config = ThreeStageObservation(config).run(_confirm)
+            config = ThreeStageObservation(config).run(confirm)
             print(f"新采集目录: {config.capture_dir}")
             print(f"新解算结果: {config.result_dir}")
         else:
@@ -108,7 +123,7 @@ def main() -> int:
             stir_observe = 1 if args.stir_observe is None else args.stir_observe
             if stir_observe == 1:
                 print("玻璃棒观测模式=1：将移动到最终观察位、采集 RGB-D 并调用 /v1/stirring/jobs。")
-                stirring_observation = StirringObservation(config).run(scene, _confirm)
+                stirring_observation = StirringObservation(config).run(scene, confirm)
             else:
                 stirring_observation = reuse_latest_stirring(config, scene)
                 print(f"玻璃棒观测模式=0：复用 {stirring_observation.result_dir}")
@@ -149,18 +164,18 @@ def main() -> int:
             "警告：前三阶段使用保存的场景坐标；只有物体、底座、TCP、夹爪与停车位均已人工确认时才可继续。"
         )
         if chemistry_names:
-            result_dir = workflow.execute(scene, chemistry_names, _confirm)
+            result_dir = workflow.execute(scene, chemistry_names, confirm)
             print(f"前三阶段执行记录: {result_dir}")
         if args.stage in {"all", "stirring"}:
             from affordance.stirring import StirringObservation, StirringWorkflow
 
             if args.stage == "all":
-                stirring_observation = StirringObservation(config).run(scene, _confirm)
+                stirring_observation = StirringObservation(config).run(scene, confirm)
             assert stirring_observation is not None
             stirring_workflow = StirringWorkflow(
                 config, scene, stirring_observation.geometry, stirring_observation.result_dir,
             )
-            stirring_run = stirring_workflow.execute(stirring_observation.capture_dir, _confirm)
+            stirring_run = stirring_workflow.execute(stirring_observation.capture_dir, confirm)
             print(f"第四阶段执行记录: {stirring_run}")
         return 0
     except KeyboardInterrupt:

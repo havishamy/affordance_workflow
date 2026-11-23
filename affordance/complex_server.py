@@ -6,7 +6,7 @@ import os
 import re
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from .complex_config import GeometryPriors
 from .config import ServerConfig
 from .geometry import validate_transform
 from .server import build_upload_files
+from .target_geometry import weighted_modal_center
 
 LOG = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ class ReconstructedObject:
     scale: np.ndarray
     model_points_world_artifact: str
     regions_world: dict[str, np.ndarray]
+    region_scores: dict[str, np.ndarray] = field(default_factory=dict)
+    main_axis_world: np.ndarray | None = None
 
     @classmethod
     def parse(
@@ -76,6 +79,7 @@ class ReconstructedObject:
         if not isinstance(raw_regions, dict):
             raise ValueError(f"objects.{name}.affordance_regions must be a JSON object.")
         regions: dict[str, np.ndarray] = {}
+        scores = {}
         for region_name in required_regions:
             region = raw_regions.get(region_name)
             if not isinstance(region, dict):
@@ -88,7 +92,11 @@ class ReconstructedObject:
             if not np.all(np.isfinite(points)):
                 raise ValueError(f"objects.{name}.{region_name}.points_world contains non-finite values.")
             regions[region_name] = points
-        return cls(name, model_id, transform, scale, artifact, regions)
+            if "scores" in region:
+                scores[region_name] = np.asarray(region["scores"], dtype=float)
+        axis = raw.get("main_axis_world")
+        return cls(name, model_id, transform, scale, artifact, regions, scores,
+                   _normalize(axis, f"{name}.main_axis_world") if axis is not None else None)
 
     def anchor_world(self, anchor_object: Any) -> np.ndarray:
         anchor = np.asarray(anchor_object, dtype=float)
@@ -104,8 +112,11 @@ class ReconstructedObject:
         )
 
     def region_center(self, name: str) -> np.ndarray:
-        # Median is deliberately computed locally from the actual affordance point region.
-        return np.median(self.regions_world[name], axis=0)
+        center, _ = weighted_modal_center(
+            self.regions_world[name], self.region_scores.get(name),
+            self.main_axis_world if self.main_axis_world is not None else (0, 0, 1),
+        )
+        return center
 
     def planar_radius_world(self, radius_object: float, axis_object: Any) -> float:
         axis = _normalize(axis_object, f"{self.name} radius axis")
@@ -185,7 +196,10 @@ class ComplexScene:
         # The beaker receiving target is an existing server affordance region,
         # reused from the old pour/beaker-mouth pipeline. Normal and radius are
         # still local physical-cell configuration, not server predictions.
-        beaker_mouth = beaker.region_center("mouth")
+        # This legacy API already supplies a small receiving-center region
+        # with local radius/normal priors; it has no downloaded rim model here.
+        # Do not apply the grasp-surface peak estimator to receiving free space.
+        beaker_mouth = np.median(beaker.regions_world["mouth"], axis=0)
         beaker_axis = _normalize(geometry.beaker_axis_out_world, "configured beaker world axis")
         dropper_tip = dropper.anchor_world(geometry.dropper_tip_anchor_object)
         reconstructions = [bottle, beaker, dropper]

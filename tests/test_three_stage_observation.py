@@ -84,7 +84,7 @@ class ObservationTests(unittest.TestCase):
                 physical_execution_validated=True,
             )
             robot, camera = Mock(), Mock()
-            start = [0.50, -0.20, 0.30, 3.14, 0, 0]
+            start = [-0.40, 0.20, 0.30, 3.14, 0, 0]
             target = observation_pose_for_current_tcp(config)
             robot.actual_tcp_pose.side_effect = [start, start, target, target, target]
             camera.capture.return_value = sample_frame()

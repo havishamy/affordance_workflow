@@ -82,10 +82,9 @@ class ComplexWorkflowTests(unittest.TestCase):
         robot.connect.assert_not_called()
 
     def test_scene_uses_regions_and_local_model_priors(self):
-        stopper_points = np.asarray(
-            self.payload["objects"]["wide_mouth_bottle"]["affordance_regions"]["stopper"]["points_world"]
-        )
-        np.testing.assert_allclose(self.scene.stopper_grasp, np.median(stopper_points, axis=0))
+        # The compact fixture is centered at this known physical location;
+        # the shared modal weighting may move within its submillimetre spread.
+        np.testing.assert_allclose(self.scene.stopper_grasp, [0.46, 0.18, 0.23], atol=0.0005)
         np.testing.assert_allclose(self.scene.beaker_mouth, [0.62, -0.10, 0.12])
         np.testing.assert_allclose(self.scene.dropper_tip, [0.55, 0.20, 0.08])
 

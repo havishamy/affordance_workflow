@@ -73,10 +73,15 @@ class ThreeStageTests(unittest.TestCase):
         cfg = self.config.bottle
         grasp = self.scene.bottle_body_grasp + self.scene.bottle_axis_out * cfg.grasp_offset_along_axis_m
         mouth = self.scene.bottle_mouth_approx
-        upright = rotvec_to_matrix(cfg.orientation_rotvec)
+        grasp_step = next(step for step in plan.steps if step.name == "bottle_body_grasp")
+        upright = rotvec_to_matrix(grasp_step.pose[3:])
         mouth_tool = upright.T @ (mouth - grasp)
         bottle_to_beaker = self.scene.beaker_mouth_center[:2] - grasp[:2]
         bottle_to_beaker /= np.linalg.norm(bottle_to_beaker)
+        pour_direction = np.array([*bottle_to_beaker, 0.0])
+        closing_world = upright @ np.asarray(cfg.closing_axis_tool)
+        self.assertAlmostEqual(float(closing_world @ pour_direction), 0.0, places=6)
+        np.testing.assert_allclose(upright[:, 2], -self.scene.bottle_axis_out, atol=1e-6)
         tilt_steps = [step for step in plan.steps if step.name.startswith("tilt_high_")]
         self.assertEqual(len(tilt_steps), cfg.tilt_steps)
         pivots = []

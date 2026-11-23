@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 
 from .config import AppConfig
+from .target_geometry import GraspCenterConfig, OpeningConfig
 
 
 def _values(raw: Any, count: int, name: str) -> tuple[float, ...]:
@@ -62,7 +63,10 @@ class StopperStageConfig:
 
 @dataclass(frozen=True)
 class BottleStageConfig:
-    orientation_rotvec: tuple[float, float, float]
+    grasp_orientation_rotvec: tuple[float, float, float]
+    keep_grasp_orientation_until_tilt: bool
+    orientation_transition_steps: int
+    closing_axis_tool: tuple[float, float, float]
     grasp_offset_along_axis_m: float
     approach_m: float
     lift_m: float
@@ -154,6 +158,8 @@ class ThreeStageConfig:
     dropper: DropperStageConfig
     stirring_perception: StirringPerceptionConfig
     stirring_motion: StirringMotionConfig
+    grasp_center: GraspCenterConfig = GraspCenterConfig()
+    beaker_opening: OpeningConfig = OpeningConfig()
 
     @classmethod
     def load(cls, path: str | Path) -> "ThreeStageConfig":
@@ -189,6 +195,8 @@ class ThreeStageConfig:
         dropper = raw["dropper"]
         stirring_perception = raw["stirring_perception"]
         stirring_motion = raw["stirring_motion"]
+        grasp_center = raw.get("grasp_center", {})
+        beaker_opening = raw.get("beaker_opening", {})
         result = cls(
             base=base,
             capture_dir=resolve(raw["capture_dir"]),
@@ -196,6 +204,17 @@ class ThreeStageConfig:
             physical_execution_validated=bool(raw.get("physical_execution_validated", False)),
             transit_z_m=float(raw.get("transit_z_m", base.motion.transit_z_m)),
             orientation_tolerance_rad=float(raw.get("orientation_tolerance_rad", 0.05)),
+            grasp_center=GraspCenterConfig(
+                bandwidth_m=float(grasp_center.get("bandwidth_m", 0.003)),
+                bin_width_m=float(grasp_center.get("bin_width_m", 0.0005)),
+            ),
+            beaker_opening=OpeningConfig(
+                rim_band_m=float(beaker_opening.get("rim_band_m", 0.004)),
+                upper_quantile=float(beaker_opening.get("upper_quantile", 0.995)),
+                wall_margin_m=float(beaker_opening.get("wall_margin_m", 0.002)),
+                receiving_margin_m=float(beaker_opening.get("receiving_margin_m", 0.003)),
+                angular_bins=int(beaker_opening.get("angular_bins", 72)),
+            ),
             observation=ObservationConfig(
                 enabled=int(observation.get("enabled", 0)),
                 reference_capture_info=resolve(
@@ -231,7 +250,17 @@ class ThreeStageConfig:
                 settle_s=float(stopper.get("settle_s", 0.8)),
             ),
             bottle=BottleStageConfig(
-                orientation_rotvec=_values(bottle["orientation_rotvec"], 3, "bottle.orientation_rotvec"),
+                grasp_orientation_rotvec=_values(
+                    bottle.get("grasp_orientation_rotvec", [3.14159, 0, 0]),
+                    3, "bottle.grasp_orientation_rotvec",
+                ),
+                keep_grasp_orientation_until_tilt=bool(
+                    bottle.get("keep_grasp_orientation_until_tilt", False)
+                ),
+                orientation_transition_steps=int(bottle.get("orientation_transition_steps", 6)),
+                closing_axis_tool=_values(
+                    bottle.get("closing_axis_tool", [1, 0, 0]), 3, "bottle.closing_axis_tool",
+                ),
                 grasp_offset_along_axis_m=float(bottle.get("grasp_offset_along_axis_m", 0.01)),
                 approach_m=float(bottle.get("approach_m", 0.10)),
                 lift_m=float(bottle.get("lift_m", 0.15)),
@@ -312,7 +341,7 @@ class ThreeStageConfig:
                 bottom_clearance_m=_optional_float(
                     stirring_motion.get("bottom_clearance_m"), "stirring_motion.bottom_clearance_m"
                 ),
-                rod_grasp_position=int(stirring_motion.get("rod_grasp_position", 50)),
+                rod_grasp_position=int(stirring_motion.get("rod_grasp_position", 20)),
                 rod_grasp_force=int(stirring_motion.get("rod_grasp_force", base.gripper.force)),
                 rod_grasp_center_tool_m=_optional_values(
                     stirring_motion.get("rod_grasp_center_tool_m"),
@@ -332,8 +361,11 @@ class ThreeStageConfig:
         return result
 
     def validate(self) -> None:
-        if not self.capture_dir.is_dir() or not self.result_dir.is_dir():
-            raise ValueError("Configured capture_dir and result_dir must exist.")
+        self.grasp_center.validate()
+        self.beaker_opening.validate()
+        # Observation mode creates fresh capture/result directories. Do not
+        # reject a valid new observation merely because old captures were
+        # cleaned up; mode 0 performs its own manifest/result validation.
         if not self.base.motion.workspace_min[2] <= self.transit_z_m <= self.base.motion.workspace_max[2]:
             raise ValueError("transit_z_m must be inside the base workspace.")
         if self.orientation_tolerance_rad <= 0:
@@ -346,8 +378,12 @@ class ThreeStageConfig:
             raise ValueError("observation.settle_s must be finite and nonnegative.")
         if not 0 < self.bottle.tilt_angle_deg < 150:
             raise ValueError("bottle.tilt_angle_deg must be between 0 and 150 degrees.")
+        if not math.isfinite(self.bottle.pour_side_offset_m) or self.bottle.pour_side_offset_m < 0:
+            raise ValueError("bottle.pour_side_offset_m must be finite and nonnegative.")
         if self.bottle.tilt_steps < 3 or self.bottle.lower_steps < 2:
             raise ValueError("Bottle tilt/lower trajectories need at least 3/2 steps.")
+        if self.bottle.orientation_transition_steps < 2:
+            raise ValueError("Bottle orientation_transition_steps must be at least two.")
         if self.bottle.pretilt_mouth_height_m <= self.bottle.pour_mouth_clearance_m:
             raise ValueError("Pre-tilt height must exceed final pour-mouth clearance.")
         if self.dropper.squeeze_cycles < 1:
@@ -373,6 +409,11 @@ class ThreeStageConfig:
             raise ValueError("All grasp positions must be more closed than the configured open position.")
         if self.dropper.squeeze_position >= self.dropper.hold_position:
             raise ValueError("dropper.squeeze_position must be more closed than hold_position.")
+        bottle_closing_axis = np.asarray(self.bottle.closing_axis_tool, dtype=float)
+        if not math.isclose(float(np.linalg.norm(bottle_closing_axis)), 1.0, abs_tol=1e-6):
+            raise ValueError("bottle.closing_axis_tool must be a unit vector.")
+        if abs(float(bottle_closing_axis[2])) > 1e-6:
+            raise ValueError("bottle.closing_axis_tool must be perpendicular to tool Z.")
         for name, value in (
             ("robot.speed", self.base.robot.speed),
             ("robot.acceleration", self.base.robot.acceleration),
