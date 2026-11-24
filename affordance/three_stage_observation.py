@@ -21,6 +21,7 @@ from .hardware import URRobot
 from .server import build_upload_files
 from .three_stage_config import ThreeStageConfig
 from .three_stage_result import _read_ply_xyz, load_scene
+from .base_table_plane import table_initialization_reference, server_accepts_table_reference, validate_table_initialization_result
 
 LOG = logging.getLogger(__name__)
 
@@ -129,6 +130,19 @@ class ThreeStageObservation:
             verify=server.verify_tls,
         ) as response:
             response.raise_for_status()
+        if self.config.table_constraint_enabled:
+            with self.health_get(
+                server.url.rstrip("/") + "/openapi.json",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=min(server.timeout_s, 8.0), verify=server.verify_tls,
+            ) as response:
+                response.raise_for_status()
+                supported = server_accepts_table_reference(response.json())
+            if not supported:
+                raise RuntimeError(
+                    "服务器尚未声明 table_plane_reference，不能应用 base z=0 的位姿初始化参考。"
+                    "已在机械臂移动前中止；客户端不会用解算后旋转或 XY 平移代替。"
+                )
 
     def _validate_observation_target(self, current: Sequence[float], target: Sequence[float]) -> list[list[float]]:
         lower = np.asarray(self.config.base.motion.workspace_min)
@@ -136,7 +150,7 @@ class ThreeStageObservation:
         self._transit_warning = None
         model_paths = [
             self.config.result_dir / "models" / f"{name}_world.ply"
-            for name in ("wide_mouth_bottle", "beaker", "dropper")
+            for name in self.config.object_names
         ]
         if all(path.is_file() for path in model_paths):
             highest_model = max(float(np.max(_read_ply_xyz(path)[:, 2])) for path in model_paths)
@@ -202,7 +216,9 @@ class ThreeStageObservation:
         server = self.config.base.server
         args = argparse.Namespace(
             capture_dir=str(capture_dir),
-            objects="wide_mouth_bottle,beaker,dropper",
+            objects=",".join(self.config.object_names),
+            table_plane_reference=table_initialization_reference() if self.config.table_constraint_enabled else None,
+            minimum_dropper_size_ratio=self.config.dropper_minimum_size_ratio,
             output_dir=str(output_dir),
             server=server.url,
             token=token,
@@ -292,6 +308,12 @@ class ThreeStageObservation:
                 bundled = result_dir / name
                 if not bundled.is_file():
                     bundled.write_bytes((output_dir / name).read_bytes())
+            if self.config.table_constraint_enabled:
+                bundled_result = json.loads((result_dir / "result.json").read_text())
+                validate_table_initialization_result(bundled_result, self.config.object_names)
+                api_result = json.loads((output_dir / "result.json").read_text())
+                if bundled_result.get("table_plane_reference") != api_result.get("table_plane_reference"):
+                    raise ValueError("Bundle and result API report different table initialization audits.")
             updated = replace(self.config, capture_dir=capture_dir, result_dir=result_dir)
             scene = load_scene(updated)
             manifest = self.config.observation.latest_result_manifest
@@ -301,6 +323,8 @@ class ThreeStageObservation:
                 "capture_dir": str(capture_dir),
                 "result_dir": str(result_dir),
                 "job_id": scene.source_job_id,
+                "dropper_count": self.config.dropper_count,
+                "dropper_size_ranking": getattr(scene, "dropper_size_ranking", {}),
                 "validated_at": datetime.now(timezone.utc).isoformat(),
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             temporary_manifest.replace(manifest)

@@ -128,7 +128,7 @@ class SavedSceneTargetTests(unittest.TestCase):
         result = capture/'complex_server_result_with_beaker/complex_6e965876-cddf-49df-92c2-c7e482462dce_all'
         if not (result/'result.json').is_file():
             raise unittest.SkipTest('Saved November regression capture is unavailable.')
-        cls.config = replace(ThreeStageConfig.load(ROOT/'config/three_stage_demo.yaml'), capture_dir=capture, result_dir=result)
+        cls.config = replace(ThreeStageConfig.load(ROOT/'config/three_stage_demo.yaml'), capture_dir=capture, result_dir=result, dropper_count=1, table_constraint_enabled=False)
         cls.scene = load_scene(cls.config)
 
     def test_all_three_scene_grasps_use_scores_and_modal_center(self):

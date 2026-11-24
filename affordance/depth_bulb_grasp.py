@@ -208,6 +208,7 @@ def save_debug(
     model_xyz=None, roi_xyxy: Sequence[int] | None = None,
     *, intrinsics: dict | None = None, t_base_camera: np.ndarray | None = None,
     calibration_path: Path | None = None, tcp_offset: Sequence[float] | None = None,
+    source_t_base_camera: np.ndarray | None = None,
 ) -> Path:
     output = capture_dir / "raw_depth_bulb_diagnostic"
     output.mkdir(parents=True, exist_ok=True)
@@ -235,6 +236,9 @@ def save_debug(
     report["world_frame"] = "base"
     if t_base_camera is not None:
         report["T_base_opencv_camera"] = t_base_camera.tolist()
+    report["postsolve_table_transform_applied"] = False
+    if source_t_base_camera is not None:
+        report["source_T_base_opencv_camera"] = source_t_base_camera.tolist()
     if calibration_path is not None:
         report["hand_eye_path"] = str(calibration_path.resolve())
         report["hand_eye_sha256"] = hashlib.sha256(calibration_path.read_bytes()).hexdigest()

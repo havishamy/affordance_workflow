@@ -26,7 +26,8 @@ from affordance.depth_bulb_grasp import (
 from affordance.hardware import DHGripper, URRobot
 from affordance.three_stage_config import ThreeStageConfig
 from affordance.target_geometry import weighted_modal_center
-from affordance.three_stage_result import _region_scores
+from affordance.three_stage_result import _read_ply_xyz, _region_scores
+from affordance.dropper_instances import DROPPER_IDS, rank_dropper_models
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -44,6 +45,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--depth-max", type=float, default=0.50)
     parser.add_argument("--grasp-z-offset", type=float, default=0.0, help="Explicit base-Z offset in meters from the visible raw-depth center; default 0 for calibration trials")
     parser.add_argument("--compare-server", action="store_true", help="Offline only: additionally compare with a matching saved server bulb region")
+    parser.add_argument("--dropper-size", choices=("small", "large"), help="With --compare-server on a dual result, explicitly select the metric-size role")
     parser.add_argument("--yes", action="store_true", help="Automatically accept observation and grasp checkpoints without reading stdin")
     return parser.parse_args(argv)
 
@@ -68,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.live and (args.capture_dir or args.compare_server):
         print("ERROR: --capture-dir and --compare-server are offline-only options.", file=sys.stderr)
+        return 2
+    if args.dropper_size and not args.compare_server:
+        print("ERROR: --dropper-size is an offline --compare-server option.", file=sys.stderr)
         return 2
     if not np.isfinite(args.grasp_z_offset):
         print("ERROR: --grasp-z-offset must be finite.", file=sys.stderr)
@@ -114,7 +119,17 @@ def main(argv: list[str] | None = None) -> int:
                         raise ValueError("Server and local camera-world transforms differ; comparison is invalid.")
                 elif server_result.get("calibration", {}).get("id") != "sha256:" + hashlib.sha256(calibration_path.read_bytes()).hexdigest():
                     raise ValueError("Cannot verify the calibration of this server comparison.")
-                dropper = server_result["objects"]["dropper"]
+                objects = server_result["objects"]
+                if any(name in objects for name in DROPPER_IDS):
+                    if args.dropper_size is None:
+                        raise ValueError("Dual-dropper comparison requires --dropper-size small or large.")
+                    clouds = {name: _read_ply_xyz(result_path.parent / objects[name]["model_points_world_artifact"]) for name in DROPPER_IDS}
+                    ranked = rank_dropper_models(clouds, config.dropper_minimum_size_ratio)
+                    dropper = objects[ranked[f"{args.dropper_size}_id"]]
+                else:
+                    if args.dropper_size is not None:
+                        raise ValueError("This is a legacy single-dropper result; it has no independently size-ranked small/large roles.")
+                    dropper = objects["dropper"]
                 region = dropper["affordance_regions"]["bulb"]
                 points = np.asarray(region["points_world"], dtype=float)
                 model_xyz, _ = weighted_modal_center(
@@ -125,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         stage = "raw_depth_estimation"
         print(f"采集目录: {capture_dir}")
         color, depth, intrinsics, scale, t_base_camera = load_saved_capture(capture_dir)
+        source_t_base_camera = t_base_camera.copy()
+        print("纯深度定位：使用原始手眼坐标，不做解算后桌面旋转、XY 平移或 Z 校正。")
         estimate = estimate_bulb_from_raw_depth(
             color, depth, intrinsics, scale, t_base_camera,
             args.roi, args.depth_min, args.depth_max,
@@ -135,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             capture_dir, color, estimate, target, model_xyz, args.roi,
             intrinsics=intrinsics, t_base_camera=t_base_camera,
             calibration_path=calibration_path, tcp_offset=config.base.robot.tcp_offset,
+            source_t_base_camera=source_t_base_camera,
         )
         camera_center = estimate.surface_center_camera_m
         center_pixel = [camera_center[0] / camera_center[2] * intrinsics["fx"] + intrinsics["cx"], camera_center[1] / camera_center[2] * intrinsics["fy"] + intrinsics["cy"]]

@@ -1,0 +1,81 @@
+请修改当前 language_affordance_grasp 服务器，使现有 /v1/complex-demo/jobs 支持双胶头滴瓶。先读项目 AGENTS.md，检查现有 Qwen/SAM 分割、SAM3D 重建/尺度恢复、affordance 投影、JSON 导出和 ZIP 打包链路，并直接完成修改和测试。
+
+一、任务范围
+场景包含：一个盛碱液的带橡胶塞广口瓶、一个烧杯、两个大小不同的胶头滴瓶。小滴瓶是滴瓶1/酚酞，大滴瓶是滴瓶2/酸液。本地顺序为拔塞→倒碱→小滴瓶固定滴定→大滴瓶固定滴定→原有可选搅拌。暂时不做颜色识别、终点判断或闭环滴定，也不新增吸液/混匀控制。服务器只做感知，不连接或控制机械臂。
+
+两个滴瓶必须先作为两个独立实例建模并恢复实际米制尺度，再仅按三维实际大小分配 small/large。不能用颜色、左右位置、标签、检测顺序、像素框大小或模型的 scale 数字直接分配角色；独立生成模型的 canonical 归一化不同，scale 大不等于实物大。
+
+二、上传接口（本地已经按此实现）
+POST /v1/complex-demo/jobs 继续使用 multipart/form-data，四个文件字段及格式不变：
+  rgb: rgb.png，uint8 三通道 PNG
+  depth: depth.png，对齐 RGB 的 uint16 PNG
+  camera: camera.json，含 width/height/fx/fy/cx/cy/depth_scale_m_per_unit
+  world_ee: T_world_ee.json，{"T_world_ee": 4x4矩阵}，即 T_base_tool0，表示 tool0 在 UR base 中的位姿，将 tool0 坐标的点变换到 base；不是带 TCP 偏移的位姿。
+保留 capture_id、depth_scale、gpu 等表单字段。
+双滴瓶请求额外发送 minimum_dropper_size_ratio（默认1.10）；请接收并将它用于下述大小可区分性检查，结果元数据记录实际采用值。
+双滴瓶请求的 requested_objects JSON 数组为：
+  ["wide_mouth_bottle","beaker","dropper_a","dropper_b"]
+requested_affordance_regions JSON 对象为：
+  {"wide_mouth_bottle":["stopper","body_grasp"],"beaker":["mouth"],"dropper_a":["bulb"],"dropper_b":["bulb"]}
+dropper_a/b 只是中性实例 ID，不代表小/大、酚酞/酸。识别并重建两个不同的完整胶头滴瓶，不能把一个物体重复分给 a/b。旧显式三物体请求 ["wide_mouth_bottle","beaker","dropper"] 应继续支持，避免破坏旧客户端；双实例请求不许静默降级成单实例。
+两者的物体类别仍然都是 dropper，请将 instance_id 与 object_class 分开。现有仅对 name=="dropper" 生效的分割描述、SAM3D 类别配置、方向/底部深度锚定、胶头投影与导出规则，都应适用于 dropper_a/b；不要把 a/b 当作未知器皿类别而走错误默认分支。
+
+三、结果 JSON 契约
+保留 job_id、capture_id、frame="world"、units="meters"、calibration.ee_frame="tool0"、calibration.world_frame="base"、coordinate_conventions。
+model_transform_convention 保持精确字符串：p_world = T_world_object @ [scale * p_object, 1]
+objects 中必须分别有 wide_mouth_bottle、beaker、dropper_a、dropper_b。每个对象保持现有 model_id、T_world_object(4x4)、scale(正数或3正数组成的向量)、model_points_world_artifact、main_axis_world 等字段。
+两个滴瓶各自必须有 affordance_regions.bulb：
+  points_world: N×3 有限世界坐标，单位米，至少3点
+  points_world_artifact: "affordance_regions/dropper_a/bulb_world.ply"（b 对应改为 dropper_b）
+  points_world_npz_artifact: "affordance_regions/dropper_a/bulb_world.npz"
+对应 NPZ 内数组必须是 points_world(N,3) 和 scores(N,)，分数与 JSON 点逐点同序；不可把一个滴瓶的权重用于另一个滴瓶。不要伪造、复制或共用两个滴瓶的位姿、点云、胶头区域或产物路径。
+
+四、与本地完全相同的大小算法
+对每个 model_points_world_artifact 中的米制 XYZ 顶点，用 float64 计算：
+  origin = points.mean(axis=0)
+  centered = points - origin
+  covariance = centered.T @ centered / len(points)
+  eigenvalues, axes = numpy.linalg.eigh(covariance)
+  axes = axes[:, numpy.argsort(eigenvalues)[::-1]]
+  projected = centered @ axes
+  bounds = numpy.quantile(projected, [0.01, 0.99], axis=0)
+  dimensions_m = bounds[1] - bounds[0]
+  volume_m3 = float(numpy.prod(dimensions_m))
+这是恢复尺度后的稳健 PCA 包围盒体积代理，不是液体容量，也不能替换为原始 canonical scale 比较。至少10个有效模型点，dimensions 必须为正。
+较小 volume 对应 small_id，较大对应 large_id；要求 large/small >= 请求的 minimum_dropper_size_ratio（缺省1.10，必须有限且>1）。两者接近、任一实例缺失/退化或重复重建同一对象时，明确返回失败原因并保留调试产物，不根据颜色/位置/名称猜测。
+result.json 增加：
+  "dropper_size_ranking": {
+    "method": "pca_obb_volume_m3_q01_q99",
+    "small_id": "dropper_a 或 dropper_b",
+    "large_id": "另一个实例ID",
+    "large_to_small_ratio": 数值,
+    "minimum_ratio": 1.10,
+    "models": {
+      "dropper_a": {"dimensions_m": [dx,dy,dz], "volume_m3": 数值},
+      "dropper_b": {"dimensions_m": [dx,dy,dz], "volume_m3": 数值}
+    }
+  }
+本地会独立重算大小；若服务端声明的 method/small_id/large_id 与本地重算不一致，会拒绝执行。实例名字和路径不能在排序后混淆或只改文件名、不改 JSON 引用。
+
+五、完整产物及 ZIP
+两个实例都要完整贯穿 00_segmentation、01_affordance、02_sam3d、03_projection、models、affordance_regions、总场景点云/GLB 和 overlay；所有按对象名遍历的代码都支持四个对象，避免数组长度仍固定为3。
+scope=all 的 ZIP 中，对每个 name（包含 dropper_a 和 dropper_b），至少保留本地读取的：
+  models/{name}_world.ply
+  models/{name}_canonical.ply
+  models/{name}_world_mesh.ply
+  02_sam3d/{name}/pose_result.json（含 silhouette_iou）
+  01_affordance/{name}/bulb/quality_metrics.json（两个滴瓶）
+  affordance_regions/{name}/bulb_world.ply 和 .npz（两个滴瓶）
+上述路径的对象实例和 JSON 引用必须一致。现有本地 PLY 读取器支持 binary_little_endian 顶点属性，请继续使用兼容格式。canonical 点和 world_mesh 顶点保持逐点对应，并满足给出的 pose/scale 变换，误差应小于 1e-4 m。保留广口瓶 stopper/body_grasp 和烧杯 mouth 的原有产物。
+job.json/result.json、输入副本、Qwen 原始输出、检测框、掩码、热图、叠加图、质量指标、pipeline.log 都放入完整调试包。可在 perception 中注明新后端版本 dual_instance_size_v1。
+烧杯开口接液目标由本地从模型上沿推导，现有杯口产物继续导出即可，本任务不要把杯口策略或其他坐标系重新改一遍。
+
+六、验收
+1. 四对象请求可完整提交、轮询、获取 result、下载 scope=all；两个滴瓶各有独立完整产物。
+2. a 大 b 小、a 小 b 大都能正确排序；实例检测顺序和左右摆放变化不改变按实际大小分配的角色。
+3. 一个滴瓶离相机较近、像素框更大，仍按恢复尺度后的模型大小判断。
+4. canonical 归一化与 scale 数值次序相反的案例仍正确；仅旋转/平移模型不改变物理大小，统一放大2倍使体积代理放大8倍。
+5. 缺失、重复、退化、大小过近、错误文件引用有明确失败；不能返回伪 completed。
+6. 旧单滴瓶接口继续通过兼容测试。
+7. 不加入颜色终点控制，不以挤压次数冒充实测滴数，不改手眼标定矩阵或单位。
+完成后列出修改文件、运行的测试、服务启动/重启命令和一份真实或自包含模拟的四对象响应/ZIP。先完成代码和测试，再报告；不要只给建议。

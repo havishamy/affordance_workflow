@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge an observed depth cloud and three fitted object models into one colored world-frame PLY."""
+"""Merge observed depth and all single/dual-dropper scene models into colored PLY/GLB."""
 
 from __future__ import annotations
 

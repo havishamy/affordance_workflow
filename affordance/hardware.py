@@ -77,10 +77,22 @@ class URRobot:
             raise RuntimeError("Robot is not connected.")
         return bool(self.control.getInverseKinematicsHasSolution([float(value) for value in pose]))
 
-    def inverse_kinematics(self, pose: Sequence[float]) -> list[float]:
+    def actual_joints(self) -> list[float]:
+        if self.receive is None:
+            raise RuntimeError("Robot is not connected.")
+        joints = [float(value) for value in self.receive.getActualQ()]
+        if len(joints) != 6 or not np.all(np.isfinite(joints)):
+            raise RuntimeError("UR did not return six finite joint positions.")
+        return joints
+
+    def inverse_kinematics(self, pose: Sequence[float], qnear: Sequence[float] | None = None) -> list[float]:
         if self.control is None:
             raise RuntimeError("Robot is not connected.")
-        joints = [float(value) for value in self.control.getInverseKinematics([float(value) for value in pose])]
+        target = [float(value) for value in pose]
+        solution = self.control.getInverseKinematics(target) if qnear is None else self.control.getInverseKinematics(
+            target, [float(value) for value in qnear],
+        )
+        joints = [float(value) for value in solution]
         if len(joints) != 6 or not np.all(np.isfinite(joints)):
             raise RuntimeError("UR controller did not return a valid six-joint IK solution.")
         return joints

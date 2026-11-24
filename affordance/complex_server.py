@@ -159,6 +159,8 @@ class ComplexScene:
         objects = payload.get("objects")
         if not isinstance(objects, dict):
             raise ValueError("Complex API response is missing objects.")
+        if "dropper_a" in objects or "dropper_b" in objects:
+            raise ValueError("Dual-dropper size-ranked results use run_three_stage_demo.py; the legacy canonical-prior run_complex_demo.py is single-dropper only.")
         minimum = geometry.minimum_affordance_points
         bottle = ReconstructedObject.parse(
             objects, "wide_mouth_bottle", geometry.bottle_model_id,

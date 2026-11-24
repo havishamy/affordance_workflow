@@ -49,7 +49,7 @@ class FakeHealth:
 class ObservationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config = ThreeStageConfig.load(ROOT / "config/three_stage_demo.yaml")
+        cls.config = replace(ThreeStageConfig.load(ROOT / "config/three_stage_demo.yaml"), table_constraint_enabled=False)
 
     def test_default_mode_is_saved_result(self):
         self.assertEqual(self.config.observation.enabled, 0)

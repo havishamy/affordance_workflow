@@ -1,0 +1,118 @@
+任务：只给服务器的模型位姿初始化加入“桌面等于 UR base 的 z=0 平面”参考。
+禁止做解算后整景旋转、相机外参补偿、XY 平移、模型拉伸或实测瓶高替换。
+
+本地客户端已按以下契约实现。修改实际运行的服务端 API 和后台 worker 后，需要重启两者。
+本文件描述的是修改要求，不表示远端服务已经部署了这个功能。
+
+1. 接口：现有 POST /v1/complex-demo/jobs
+保持 rgb、depth、camera、world_ee 文件字段及已有三/四对象请求不变。
+新增可选 multipart 文本字段 table_plane_reference，内容为 JSON 字符串。
+FastAPI 现有路由函数参数新增：
+    table_plane_reference: str | None = Form(None)
+使此字段出现在 /openapi.json 对应 multipart 请求 schema 的 properties 中。
+本地会检查该字段是否被正式声明；不能只把参数放到 **kwargs 或静默忽略。
+
+精确请求 JSON 见 config/table_plane_reference.json：
+{
+  "frame": "base",
+  "units": "meters",
+  "normal": [0, 0, 1],
+  "offset_m": 0.0,
+  "apply_stage": "pose_initialization",
+  "allowed_adjustment": "z_translation_only",
+  "preserve_object_xy": true,
+  "preserve_object_rotation": true,
+  "preserve_object_scale": true,
+  "postsolve_scene_transform": false
+}
+
+未传此字段时保留原行为，兼容旧客户端。
+传入后必须严格解析、校验、持久化到 job 输入，并传到后台 worker 的模型初始化步骤。
+队列重试、进程重启和缓存命中均不能丢失或复用另一请求的参考参数。
+请求不合法明确返回 400/422，不能默默退回观测桌面或执行整景转正。
+
+2. 已知平面的坐标含义
+固定的是机器人 base 的平面：n_world=[0,0,1], d_world=0，n_world·p_world+d_world=0。
+world_ee 仍是实测 T_base_tool0；T_ee_cam 和所有相机坐标约定不改。
+若初始化内部消费相机坐标平面，应使用原有标定链得到 T_world_opencv_camera=[R_wc,t_wc]，然后：
+    n_camera = R_wc.T @ [0,0,1]
+    d_camera = t_wc[2]
+相机里的平面通常不是“法线 [0,0,1]、偏移0”。不要把 base 平面数字直接当相机平面。
+若内部使用 SAM3D/PyTorch3D 基，使用已有经过验证的基变换转换同一平面，且只转换一次。
+这是平面方程的坐标表达，不是旋转实测点云、模型、相机外参或机器人位姿。
+原始观测桌面可以保留用于调试，但不得覆盖请求指定的初始化参考。
+
+3. 初始化接入位置和计算
+可把本地提供的 server_base_table_reference.py 复制到服务端使用；该文件是独立 NumPy 模块。
+先按原流程获取 canonical 网格、模型初始旋转 R0、解算尺度 s 和初始平移 t0。
+新增的桌面参考步骤必须位于最终优化之前，且只能修改模型初始平移的 Z 分量：
+    p0_i = R0 @ (s * vertex_i) + t0
+    delta_z = -min_i(p0_i.z)
+    t_init = t0.copy()
+    t_init.z += delta_z
+    t_init.x = t0.x
+    t_init.y = t0.y
+R0、s 和 canonical 顶点在这一步保持不变。若已有明确的支撑/瓶底几何，请使用其真实支撑顶点集；
+提供的参考实现默认使用完整 canonical 网格的最低顶点作为支撑。
+
+服务端参考接线示例（变量名按实际项目适配）：
+    from server_base_table_reference import parse_reference, initialize_pose_z_only, result_confirmation
+    reference = parse_reference(table_plane_reference)
+    # 将 reference 保存到 job 输入，在 worker 中读取。
+    if reference is not None:
+        T_init, audit = initialize_pose_z_only(vertices_object, T_init, estimated_scale, reference)
+        table_audits[object_name] = audit
+    # 用 T_init 进入原有模型优化；不要在优化结果出来后再补这个步骤。
+
+若实际初始化/优化工作在相机系，必须先转到 base 做这一步，再转回原相机系：
+    T_world_object = T_world_camera @ T_camera_object
+    T_world_object, audit = initialize_pose_z_only(vertices_object, T_world_object, scale, reference)
+    T_camera_object_init = numpy.linalg.inv(T_world_camera) @ T_world_object
+这里 T_world_camera 和 T_camera_object 必须使用同一个现有相机基（OpenCV 或已验证的内部基）。
+不能把相机坐标的 Z 当作 base Z。相机坐标的平移分量可能都会变化，但转回 base 后 XY 必须不变。
+如果旧接口使用行向量矩阵或把 scale 烘焙在矩阵中，先按现有规范还原列向量 SE(3)+独立scale，不能重复乘尺度。
+
+对 wide_mouth_bottle、beaker、dropper 或 dropper_a/dropper_b 的每个完整桌面物体执行一次。
+不要将胶头 affordance 区域、瓶塞区域或滴管尖端单独压到 z=0。
+不要把 92 mm、82 mm 或其他实物尺寸写进初始化、尺度或结果。
+这一步的 XY/R/scale 不变要求针对“新增桌面参考步骤”；原有后续正常模型解算按原逻辑运行，
+不新增 XY、旋转或尺度补偿。不要承诺最终结果一定贴平桌面：本次用户要求的是初始化条件。
+若原流程后续有桌面旋转/整景转正补丁，应禁用它，不能重新引入。
+
+4. 请求回执和逐对象审计（本地会严格验证）
+完成 worker 初始化后，在 GET /jobs/{job_id}/result 的 result.json 顶层加入：
+    result["table_plane_reference"] = result_confirmation(reference, table_audits)
+回执将请求 JSON 全部字段原样包含，再增加：
+    "applied": true,
+    "objects": {
+        "wide_mouth_bottle": {
+            "T_world_object_before": <初始化桌面步骤之前的4x4列向量SE3矩阵>,
+            "T_world_object_after": <该步骤之后的4x4列向量SE3矩阵>,
+            "scale_before": [sx,sy,sz],
+            "scale_after": [sx,sy,sz],
+            "support_min_z_before_m": <该步骤前模型支撑点最小base Z>,
+            "support_min_z_after_m": <该步骤后模型支撑点最小base Z，约为0>
+        },
+        ...每个请求物体各自一份...
+    }
+T_before 和 T_after 除 [2,3] 外必须相同（本地误差容差 1e-9），尺度必须逐元素相同。
+支撑点步骤后的 Z 要在 1e-6 m 内等于0；矩阵 Z 差要与支撑点 Z 变化一致。
+这两份矩阵是初始化审计，不是最终优化位姿；不要拿优化后的结果冒充初始化前后。
+未真正执行此步骤时，不得伪造 applied=true 或审计数据。
+
+scope=all ZIP 中的 result.json 必须含同一份完整回执，和 result API 一致。
+保留原有 final T_world_object、scale、canonical/world 网格逐点对应关系、affordance NPZ scores 顺序，
+继续保证每个最终物体的 JSON 变换能复现其 world_mesh；不新增客户端后处理。
+
+5. 验收
+- /openapi.json 出现 table_plane_reference。
+- 请求参数真正传到后台 worker，初始模型支撑 Z=0，XY/R/scale 在新增步骤内不变。
+- 相机平面方程转换正确：任意相机点代入所得平面值等于该点转到base后的Z。
+- 三对象和双滴瓶都能运行，scope=all、API JSON 的初始化回执一致。
+- 本地不声明字段、缺回执、applied=false、缺物体审计、改XY/旋转/尺度、伪造底部Z都会拒绝。
+- 原始 world_ee、相机标定和测量点云不被修改；旧数据不被事后转平。
+- 服务端重启后先在本地只采集/解算，不加 --execute：
+    python run_three_stage_demo.py --dropper-count 2 --observe 1 --stage all --yes
+  此命令会移动到观察位，但不会执行抓取、倾倒或滴定。
+- 本地应打印服务器已确认 base z=0 的 Z-only 初始化。
+  确认回执、模型和抓取点后，再按原完整实验命令使用 --execute。

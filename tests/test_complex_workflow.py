@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -20,6 +21,9 @@ class ComplexWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.config = ComplexDemoConfig.load(ROOT / "config" / "complex_demo.yaml")
+        # This legacy JSON fixture is in the positive-X cell; isolate its
+        # workspace from the user's current negative-X hardware configuration.
+        cls.config = replace(cls.config, base=replace(cls.config.base, motion=replace(cls.config.base.motion, workspace_min=(-1,-1,.015), workspace_max=(1,1,.7))))
         cls.payload = json.loads((ROOT / "config" / "complex_scene_example.json").read_text())
         cls.scene = ComplexScene.from_response(cls.payload, cls.config.geometry)
 

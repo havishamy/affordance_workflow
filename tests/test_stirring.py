@@ -1,13 +1,15 @@
 import unittest
+import tempfile
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
-from affordance.stirring import StirringWorkflow, validate_stirring_result
+from affordance.stirring import StirringWorkflow, validate_stirring_result, load_stirring_result
 from affordance.three_stage_config import ThreeStageConfig
 from affordance.three_stage_result import load_scene
+from fixture_scenes import build_scene
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,9 +77,30 @@ def sample_result():
 
 
 class StirringTests(unittest.TestCase):
+    def test_stirring_loader_preserves_original_coordinates_with_initialization_reference(self):
+        original = sample_result()
+        geometry = validate_stirring_result(original, self.config, 'test-capture', np.eye(4))
+        config = replace(self.config, table_constraint_enabled=True)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'result.json').write_text(__import__('json').dumps(original))
+            for artifact in geometry.artifact_paths:
+                path = root/artifact
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'fixture')
+            with patch('affordance.stirring._expected_world_camera', return_value=np.eye(4)):
+                loaded = load_stirring_result(config, Path('test-capture'), root)
+            np.testing.assert_array_equal(loaded.endpoint_a_world, geometry.endpoint_a_world)
+            np.testing.assert_array_equal(loaded.endpoint_b_world, geometry.endpoint_b_world)
+            self.assertEqual(loaded.length_m, geometry.length_m)
+            self.assertFalse((root/'local_table_constrained_geometry.json').exists())
+
     @classmethod
     def setUpClass(cls):
-        cls.config = ThreeStageConfig.load(ROOT / "config/three_stage_demo.yaml")
+        cls.fixture = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.fixture.cleanup)
+        cls.config, _ = build_scene(cls.fixture.name, dual=False)
+        cls.config = replace(cls.config, base=replace(cls.config.base, motion=replace(cls.config.base.motion, workspace_min=(-1,-1,.015), workspace_max=(1,1,.7))))
         cls.scene = load_scene(cls.config)
 
     def configured_motion(self):

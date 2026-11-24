@@ -11,6 +11,7 @@ from affordance.geometry import rotvec_to_matrix
 from affordance.three_stage_config import ThreeStageConfig
 from affordance.three_stage_result import _circle_from_partial_rim, load_scene
 from affordance.three_stage_workflow import CHEMISTRY_STAGES, STAGES, ThreeStageWorkflow
+from fixture_scenes import build_scene
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,17 +20,20 @@ ROOT = Path(__file__).resolve().parents[1]
 class ThreeStageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config = ThreeStageConfig.load(ROOT / "config/three_stage_demo.yaml")
+        cls.fixture = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.fixture.cleanup)
+        cls.config, _ = build_scene(cls.fixture.name, dual=False)
+        cls.config = replace(cls.config, base=replace(cls.config.base, motion=replace(cls.config.base.motion, workspace_min=(-1,-1,.015), workspace_max=(1,1,.7))))
         cls.scene = load_scene(cls.config)
 
     def test_actual_result_quality_and_beaker_arc_fit(self):
         scene = self.scene
-        self.assertEqual(scene.source_capture_id, "20260921_171530_302852")
-        self.assertEqual(scene.source_job_id, "df530c2b-86be-4cc5-82b1-646908ab7886")
+        self.assertEqual(scene.source_capture_id, "synthetic_capture")
+        self.assertEqual(scene.source_job_id, "synthetic-job")
         self.assertGreater(scene.stopper_grasp[2] - scene.bottle_body_grasp[2], 0.035)
-        self.assertAlmostEqual(scene.beaker_mouth_center[0], 0.6509, delta=0.002)
-        self.assertAlmostEqual(scene.beaker_mouth_center[1], -0.0224, delta=0.002)
-        self.assertAlmostEqual(scene.beaker_inner_radius_estimate_m, 0.0297, delta=0.002)
+        self.assertAlmostEqual(scene.beaker_mouth_center[0], -.43, delta=0.002)
+        self.assertAlmostEqual(scene.beaker_mouth_center[1], .35, delta=0.002)
+        self.assertAlmostEqual(scene.beaker_inner_radius_estimate_m, .028, delta=0.002)
         report = scene.quality_report["beaker_circle_fit"]
         self.assertLess(report["residual_rms_m"], 0.001)
         # The raw region is a partial side arc: its median would target the rim.
@@ -45,9 +49,9 @@ class ThreeStageTests(unittest.TestCase):
         robot, gripper = Mock(), Mock()
         workflow = ThreeStageWorkflow(self.config, robot=robot, gripper=gripper)
         plans = workflow.plan_all(self.scene, workflow.captured_tcp_pose())
-        self.assertEqual(STAGES, (*CHEMISTRY_STAGES, "stirring"))
+        self.assertTrue(set((*CHEMISTRY_STAGES, "dropper_small", "dropper_large", "stirring")).issubset(STAGES))
         self.assertEqual(tuple(plan.name for plan in plans), CHEMISTRY_STAGES)
-        self.assertEqual([sum(step.kind == "moveL" for step in plan.steps) for plan in plans], [10, 45, 15])
+        self.assertEqual([sum(step.kind == "moveL" for step in plan.steps) for plan in plans], [10, 51, 15])
         self.assertEqual(sum(step.name.startswith("squeeze_") for step in plans[2].steps), 1)
         robot.connect.assert_not_called()
         robot.move_linear.assert_not_called()
@@ -73,8 +77,10 @@ class ThreeStageTests(unittest.TestCase):
         cfg = self.config.bottle
         grasp = self.scene.bottle_body_grasp + self.scene.bottle_axis_out * cfg.grasp_offset_along_axis_m
         mouth = self.scene.bottle_mouth_approx
-        grasp_step = next(step for step in plan.steps if step.name == "bottle_body_grasp")
-        upright = rotvec_to_matrix(grasp_step.pose[3:])
+        # The body is approached with the configured fixed grasp orientation;
+        # the dynamic pour yaw is reached later at high transit clearance.
+        upright_step = next(step for step in plan.steps if step.name == "bottle_high_upright")
+        upright = rotvec_to_matrix(upright_step.pose[3:])
         mouth_tool = upright.T @ (mouth - grasp)
         bottle_to_beaker = self.scene.beaker_mouth_center[:2] - grasp[:2]
         bottle_to_beaker /= np.linalg.norm(bottle_to_beaker)
@@ -194,7 +200,7 @@ class ThreeStageTests(unittest.TestCase):
     def test_low_result_quality_becomes_visible_advisory(self):
         strict = replace(
             self.config,
-            quality=replace(self.config.quality, minimum_silhouette_iou=0.95),
+            quality=replace(self.config.quality, minimum_silhouette_iou=0.99),
         )
         with self.assertLogs("affordance.three_stage_result", level="WARNING"):
             scene = load_scene(strict)

@@ -475,7 +475,7 @@ class StirringObservation:
                 "warning": "Cartesian fence only; no complete arm/camera/cable collision model.",
             })
             print(
-                "Stirring observation will move now: dropper must be returned/released, gripper empty, "
+                "Stirring observation will move now: all droppers must be returned/released, gripper empty, "
                 "glass rod flat and fully visible, beaker unmoved, and the route clear. "
                 "The explicit --stir-observe 1 option authorizes this observation move.",
                 flush=True,
@@ -718,7 +718,7 @@ class StirringWorkflow:
         preinsert_tip = mouth + up * measured["preinsert_clearance_m"]
         stir_center_tip = mouth - up * measured["target_depth_below_mouth_m"]
         beaker_bottom_proxy_z = float(np.min(
-            _read_ply_xyz(self.config.result_dir / "models" / "beaker_world.ply")[:, 2]
+            _read_ply_xyz(self.config.result_dir / self.scene.model_artifacts.get("beaker", "models/beaker_world.ply"))[:, 2]
         ))
         tip_surface_bottom_clearance = (
             stir_center_tip[2] - self.geometry.rod_radius_m - beaker_bottom_proxy_z

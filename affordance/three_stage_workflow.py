@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
@@ -17,10 +17,11 @@ from .hardware import DHGripper, URRobot
 from .three_stage_config import ThreeStageConfig
 from .three_stage_result import SceneGeometry, _read_ply_xyz, load_scene
 from .target_geometry import sample_opening_disk, unit_axis
+from .dropper_instances import LEGACY_CHEMISTRY_STAGES
 
 LOG = logging.getLogger(__name__)
-CHEMISTRY_STAGES = ("stopper", "bottle", "dropper")
-STAGES = (*CHEMISTRY_STAGES, "stirring")
+CHEMISTRY_STAGES = LEGACY_CHEMISTRY_STAGES  # historical import; runtime order is config.chemistry_stages
+STAGES = (*CHEMISTRY_STAGES, "dropper_small", "dropper_large", "dropper_1", "dropper_2", "stirring")
 
 
 @dataclass(frozen=True)
@@ -47,12 +48,14 @@ class StagePlan:
     name: str
     steps: tuple[Step, ...]
     warnings: tuple[str, ...] = ()
+    metadata: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
             "name": self.name,
             "steps": [step.as_dict() for step in self.steps],
             "warnings": list(self.warnings),
+            "metadata": self.metadata,
         }
 
     @property
@@ -174,7 +177,11 @@ class ThreeStageWorkflow:
         elif name == "bottle":
             plan = self._plan_bottle(scene, current_pose)
         elif name == "dropper":
+            if self.config.dropper_count == 2:
+                raise ValueError("In dual mode 'dropper' selects both operations; use plan_sequence or --stage dropper.")
             plan = self._plan_dropper(scene, current_pose)
+        elif name in ("dropper_small", "dropper_large"):
+            plan = self._plan_dropper(scene, current_pose, role=name.removeprefix("dropper_"))
         else:
             raise ValueError(f"Unknown stage: {name}")
         warnings = self._validate_plan(plan, current_pose, scene)
@@ -184,9 +191,12 @@ class ThreeStageWorkflow:
         return plan
 
     def plan_all(self, scene: SceneGeometry, initial_pose: Sequence[float]) -> tuple[StagePlan, ...]:
+        return self.plan_sequence(self.config.chemistry_stages, scene, initial_pose)
+
+    def plan_sequence(self, names: Sequence[str], scene: SceneGeometry, initial_pose: Sequence[float]) -> tuple[StagePlan, ...]:
         pose = tuple(initial_pose)
         stages: list[StagePlan] = []
-        for name in CHEMISTRY_STAGES:
+        for name in names:
             plan = self.plan_stage(name, scene, pose)
             stages.append(plan)
             pose = plan.last_pose
@@ -225,7 +235,9 @@ class ThreeStageWorkflow:
         )
         return StagePlan("stopper", steps)
 
-    def _plan_bottle(self, scene: SceneGeometry, current_pose: Sequence[float]) -> StagePlan:
+    def _plan_bottle(
+        self, scene: SceneGeometry, current_pose: Sequence[float], orientation_branch: int | None = None,
+    ) -> StagePlan:
         cfg = self.config.bottle
         warnings: list[str] = []
         opening = scene.quality_report.get("beaker_opening", {})
@@ -252,8 +264,17 @@ class ThreeStageWorkflow:
         upright_rotation, toward_beaker, tilt_axis = _bottle_upright_rotation(
             up, np.array([*toward_beaker_xy, 0.0]), cfg.closing_axis_tool,
         )
-        upright_rotvec = _rotvec(upright_rotation)
         grasp_rotvec = cfg.grasp_orientation_rotvec
+        grasp_rotation = rotvec_to_matrix(grasp_rotvec)
+        # Parallel jaws define an unoriented line. Both yaw branches preserve
+        # that line and world-down tool Z; the signed pour axis stays unchanged.
+        candidates = [upright_rotation, _axis_angle_rotation(up, math.pi) @ upright_rotation]
+        angles = [float(np.linalg.norm(_rotvec(grasp_rotation.T @ rotation))) for rotation in candidates]
+        branch = int(np.argmin(angles)) if orientation_branch is None else orientation_branch
+        if branch not in (0, 1):
+            raise ValueError("Bottle orientation branch must be 0 or 1.")
+        upright_rotation = candidates[branch]
+        upright_rotvec = _rotvec(upright_rotation)
         if cfg.keep_grasp_orientation_until_tilt:
             # Keep the proven grasp orientation through approach, grasp, lift,
             # and transfer. Start the actual pour as a gradual tilt from this
@@ -262,6 +283,7 @@ class ThreeStageWorkflow:
             upright_rotvec = grasp_rotvec
             tilt_axis = np.cross(up / np.linalg.norm(up), np.array([*toward_beaker_xy, 0.0]))
             tilt_axis = tilt_axis / np.linalg.norm(tilt_axis)
+            branch = 0
         mouth_tool = upright_rotation.T @ (mouth - grasp)
         normal = unit_axis(opening.get("normal_world", [0, 0, 1]))
         side_direction = np.array([*from_beaker_to_bottle, 0.0])
@@ -338,11 +360,90 @@ class ThreeStageWorkflow:
             _grip("release_bottle", self.config.base.gripper.open_position),
             _move("retreat_from_bottle", approach, upright_rotvec),
         ))
-        return StagePlan("bottle", tuple(steps), tuple(warnings))
+        return StagePlan("bottle", tuple(steps), tuple(warnings), metadata={
+            "orientation_branch": branch,
+            "orientation_transition_deg": 0.0 if cfg.keep_grasp_orientation_until_tilt else math.degrees(angles[branch]),
+            "equivalent_branch_transition_deg": [math.degrees(angle) for angle in angles],
+            "orientation_selection": "nearest_rotation_offline; joint-path selection before live bottle motion",
+        })
 
-    def _plan_dropper(self, scene: SceneGeometry, current_pose: Sequence[float]) -> StagePlan:
-        cfg = self.config.dropper
-        bulb = scene.dropper_bulb_grasp + np.array([0.0, 0.0, cfg.grasp_offset_z_m])
+    def _bottle_joint_preflight(self, plan: StagePlan, current_pose, start_joints) -> dict:
+        """Check the whole Cartesian route with continuous, seeded controller IK.
+
+        Each segment is sampled at <=10 mm and <=5 degrees. A large raw joint
+        jump is rejected rather than hidden by wrapping angles modulo 2*pi.
+        """
+        previous_pose = np.asarray(current_pose, dtype=float)
+        joints = np.asarray(start_joints, dtype=float)
+        if joints.shape != (6,) or not np.all(np.isfinite(joints)):
+            raise RuntimeError("Bottle preflight requires six finite live joint positions.")
+        if not self.robot.joints_within_safety_limits(joints.tolist()):
+            raise RuntimeError("Current joints fail controller safety limits.")
+        travel, largest_jump, samples = 0.0, 0.0, 0
+        for step in plan.steps:
+            if step.pose is None:
+                continue
+            target = np.asarray(step.pose, dtype=float)
+            start_rotation = rotvec_to_matrix(previous_pose[3:])
+            relative = _rotvec(start_rotation.T @ rotvec_to_matrix(target[3:]))
+            count = max(1, math.ceil(np.linalg.norm(target[:3]-previous_pose[:3])/.01),
+                        math.ceil(np.linalg.norm(relative)/math.radians(5)))
+            for index in range(1, count+1):
+                fraction = index/count
+                xyz = previous_pose[:3]*(1-fraction)+target[:3]*fraction
+                rotation = start_rotation @ rotvec_to_matrix(relative*fraction)
+                pose = [*xyz.tolist(), *_rotvec(rotation).tolist()]
+                try:
+                    following = np.asarray(self.robot.inverse_kinematics(pose, qnear=joints.tolist()), dtype=float)
+                except Exception as exc:
+                    raise RuntimeError(f"{step.name}: controller IK failed at sample {index}/{count}: {exc}") from exc
+                if following.shape != (6,) or not np.all(np.isfinite(following)):
+                    raise RuntimeError(f"{step.name}: controller returned invalid IK.")
+                if not self.robot.joints_within_safety_limits(following.tolist()):
+                    raise RuntimeError(f"{step.name}: IK violates controller joint/safety limits at sample {index}/{count}.")
+                delta = np.abs(following-joints)
+                jump = float(delta.max())
+                if jump > math.radians(45):
+                    raise RuntimeError(f"{step.name}: discontinuous IK joint jump {math.degrees(jump):.1f} deg.")
+                largest_jump = max(largest_jump, jump)
+                travel += float(delta.sum())
+                joints = following
+                samples += 1
+            previous_pose = target
+        return {"samples": samples, "total_joint_travel_rad": travel,
+                "largest_sample_joint_change_deg": math.degrees(largest_jump),
+                "start_joints_rad": list(start_joints), "final_joints_rad": joints.tolist()}
+
+    def _select_live_bottle_plan(self, scene, current_pose) -> StagePlan:
+        """Compare both valid jaw orientations before approaching/gripping."""
+        start_joints = self.robot.actual_joints()
+        checked, rejected = [], []
+        for branch in ((0,) if self.config.bottle.keep_grasp_orientation_until_tilt else (0, 1)):
+            try:
+                plan = self._plan_bottle(scene, current_pose, orientation_branch=branch)
+                warnings = self._validate_plan(plan, current_pose, scene)
+                plan = replace(plan, warnings=(*plan.warnings, *warnings))
+                audit = self._bottle_joint_preflight(plan, current_pose, start_joints)
+                checked.append(replace(plan, metadata={**plan.metadata, "joint_preflight": audit}))
+            except (RuntimeError, ValueError) as exc:
+                rejected.append({"branch": branch, "reason": str(exc)})
+        if not checked:
+            raise RuntimeError(f"No continuous bottle route passes controller IK and joint limits; no bottle motion started. {rejected}")
+        best = min(checked, key=lambda plan: (
+            plan.metadata["joint_preflight"]["total_joint_travel_rad"], plan.metadata["orientation_transition_deg"],
+        ))
+        metadata = {**best.metadata, "orientation_selection": "minimum_joint_travel_among_controller_valid_routes",
+                    "rejected_orientation_branches": rejected,
+                    "valid_orientation_branches": [{"branch": plan.metadata["orientation_branch"],
+                        "transition_deg": plan.metadata["orientation_transition_deg"],
+                        "joint_travel_rad": plan.metadata["joint_preflight"]["total_joint_travel_rad"]} for plan in checked]}
+        LOG.info("Bottle orientation: branch=%s, transition=%.1f deg; controller-valid alternatives=%s",
+                 metadata["orientation_branch"], metadata["orientation_transition_deg"], metadata["valid_orientation_branches"])
+        return replace(best, metadata=metadata)
+
+    def _plan_dropper(self, scene: SceneGeometry, current_pose: Sequence[float], role: str = "single") -> StagePlan:
+        cfg = self.config.dropper_motion(role)
+        bulb = scene.dropper_grasp(role) + np.array([0.0, 0.0, cfg.grasp_offset_z_m])
         approach = bulb + np.array([0, 0, cfg.approach_m])
         extracted = bulb + np.array([0, 0, cfg.extraction_m])
         # tip_below_bulb_m is measured from the nominal affordance center.
@@ -386,7 +487,16 @@ class ThreeStageWorkflow:
             _grip("release_dropper", self.config.base.gripper.open_position),
             _move("retreat_from_dropper", approach, cfg.orientation_rotvec),
         ))
-        return StagePlan("dropper", tuple(steps))
+        name = "dropper" if role == "single" else f"dropper_{role}"
+        instance_id = scene.dropper_instance_ids.get(role, "dropper")
+        return StagePlan(name, tuple(steps), metadata={
+            "dropper_role": role, "source_object_id": instance_id,
+            "reagent_role": {"small": "phenolphthalein", "large": "acid"}.get(role, "legacy"),
+            "size_metric": scene.dropper_size_ranking.get("models", {}).get(instance_id),
+            "motion_parameters": asdict(cfg),
+            "dose_control": "fixed_squeeze_cycles_no_color_feedback",
+            "return_grasp_base_m": bulb.tolist(),
+        })
 
     def _validate_pose(self, pose: Sequence[float], label: str) -> None:
         values = np.asarray(pose, dtype=float)
@@ -424,7 +534,8 @@ class ThreeStageWorkflow:
         self, plan: StagePlan, scene: SceneGeometry,
     ) -> list[str]:
         """Report uncertain model clearances; never claim full collision safety."""
-        cloud = _read_ply_xyz(self.config.result_dir / "models/wide_mouth_bottle_world.ply")
+        artifact = scene.model_artifacts.get("wide_mouth_bottle", "models/wide_mouth_bottle_world.ply")
+        cloud = _read_ply_xyz(self.config.result_dir / artifact)
         grasp = scene.bottle_body_grasp + scene.bottle_axis_out * self.config.bottle.grasp_offset_along_axis_m
         grasp_step = next(step for step in plan.steps if step.name == "bottle_body_grasp")
         assert grasp_step.pose is not None
@@ -467,7 +578,8 @@ class ThreeStageWorkflow:
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def save_offline_plan(self, scene: SceneGeometry, plans: Sequence[StagePlan]) -> Path:
-        output = self.config.result_dir / "local_three_stage_plan.json"
+        filename = "local_three_stage_plan_original_coordinates.json" if self.config.table_constraint_enabled else "local_three_stage_plan.json"
+        output = self.config.result_dir / filename
         target_artifacts = {}
         opening = scene.quality_report.get("beaker_opening")
         if opening:
@@ -514,16 +626,17 @@ class ThreeStageWorkflow:
             raise RuntimeError("physical_execution_validated is false; refusing to connect to robot.")
         if not self.config.base.calibration.validated:
             raise RuntimeError("Hand-eye calibration is not validated; refusing to connect to robot.")
-        if tuple(stage_names) != CHEMISTRY_STAGES and not (
-            len(stage_names) == 1 and stage_names[0] in CHEMISTRY_STAGES
+        stage_names = tuple(name for stage in stage_names for name in self.config.select_chemistry_stages(stage))
+        if stage_names != self.config.chemistry_stages and stage_names != ("dropper_small", "dropper_large") and not (
+            len(stage_names) == 1 and stage_names[0] in self.config.chemistry_stages
         ):
-            raise ValueError("Select all three stages in order, or exactly one stage.")
+            raise ValueError("Select all chemistry stages in order, the ordered pair of droppers, or one explicit stage.")
         # A low transit height can turn the first horizontal move from an
         # arbitrary start pose into a sweep through the saved scene. This is
         # only an object-height proxy; it is not full collision checking.
         tallest_model_z = max(
-            float(np.max(_read_ply_xyz(self.config.result_dir / "models" / f"{name}_world.ply")[:, 2]))
-            for name in ("wide_mouth_bottle", "beaker", "dropper")
+            float(np.max(_read_ply_xyz(self.config.result_dir / artifact)[:, 2]))
+            for artifact in (scene.model_artifacts or {name: f"models/{name}_world.ply" for name in self.config.object_names}).values()
         )
         minimum_transit_z = tallest_model_z + 0.080
         transit_warning = None
@@ -546,18 +659,18 @@ class ThreeStageWorkflow:
             self._validate_pose(current, "current_robot_pose")
             if stage_names[0] == "stopper":
                 scene_message = (
-                    "Confirm the gripper is empty; bottle, stopper, dropper and beaker still match the saved capture; "
+                    "Confirm the gripper is empty; bottle, stopper, all droppers and beaker still match the saved capture; "
                     "and lifting vertically from the current TCP to transit height is clear"
                 )
             elif stage_names[0] == "bottle":
                 scene_message = (
                     "Confirm the stopper has actually been removed and parked, the gripper is empty, "
-                    "bottle/dropper/beaker remain at their saved positions, and vertical lift from the current TCP is clear"
+                    "bottle/all droppers/beaker remain at their saved positions, and vertical lift from the current TCP is clear"
                 )
             else:
                 scene_message = (
                     "Confirm the bottle is back at its saved position, the gripper is empty, "
-                    "dropper/beaker have not moved, and vertical lift from the current TCP is clear"
+                    "all droppers/beaker have not moved, the previous pipette is returned, and vertical lift from the current TCP is clear"
                 )
             if transit_warning:
                 scene_message += "\nWARNING: " + transit_warning
@@ -567,7 +680,7 @@ class ThreeStageWorkflow:
             self._assert_pose_unchanged(current, self.robot.actual_tcp_pose(), "during scene confirmation")
             for name in stage_names:
                 current = self.robot.actual_tcp_pose()
-                plan = self.plan_stage(name, scene, current)
+                plan = self._select_live_bottle_plan(scene, current) if name == "bottle" else self.plan_stage(name, scene, current)
                 plan_path = run_dir / f"plan_{name}.json"
                 self._write_json(plan_path, plan.as_dict())
                 stage_message = f"Review live-start {name} plan at {plan_path} and physical clearances"
@@ -584,6 +697,8 @@ class ThreeStageWorkflow:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "final_tcp_pose": self.robot.actual_tcp_pose(),
                 "source_job_id": scene.source_job_id,
+                "dropper_instance_ids": scene.dropper_instance_ids,
+                "dropper_size_ranking": scene.dropper_size_ranking,
             })
             return run_dir
         except BaseException as exc:
@@ -598,12 +713,19 @@ class ThreeStageWorkflow:
     def _run_stage(self, plan: StagePlan, confirm: Callable[[str, str], None], event_path: Path) -> None:
         for step in plan.steps:
             record = {"time": datetime.now(timezone.utc).isoformat(), "stage": plan.name, "step": step.name, "status": "started"}
+            if plan.metadata.get("source_object_id"):
+                record["source_object_id"] = plan.metadata["source_object_id"]
+                record["dropper_role"] = plan.metadata["dropper_role"]
             with event_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
             try:
                 if step.kind == "moveL":
                     assert step.pose is not None
+                    if plan.name == "bottle":
+                        record["joints_before_rad"] = self.robot.actual_joints()
                     self.robot.move_linear(step.pose)
+                    if plan.name == "bottle":
+                        record["joints_after_rad"] = self.robot.actual_joints()
                 elif step.kind == "gripper":
                     assert step.gripper_position is not None
                     self.gripper.set_position(step.gripper_position)

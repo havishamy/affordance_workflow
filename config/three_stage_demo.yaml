@@ -1,4 +1,4 @@
-# Independent three-stage experiment. The original titration workflow/config is untouched.
+# Four chemistry stages: stopper, base pour, small dropper, large dropper.
 base_config: "config.yaml"
 capture_dir: "../captures"
 result_dir: "../captures"
@@ -24,6 +24,16 @@ robot:
 
 transit_z_m: 0.22
 orientation_tolerance_rad: 0.05
+
+# Known base z=0 plane is a SERVER POSE-INITIALIZATION reference only.
+# Preserve object XY, orientation and scale; allow Z translation at initialization.
+# Never rotate/translate solved scene coordinates to make the table look level.
+table_constraint:
+  enabled: true
+  stage: initialization_only
+  frame: base
+  height_m: 0.0
+  preserve_xy: true
 
 # Shared by stopper, bottle body and bulb. Axis comes from each object;
 # candidate points outside the configured XYZ workspace do not vote.
@@ -72,13 +82,13 @@ bottle:
   # Top-down lateral grip. The planner dynamically chooses yaw so this physical
   # jaw-closing axis is perpendicular to the detected bottle-to-beaker direction.
   # Use the safe vertical grasp orientation while approaching/closing. The
-  # Use a near-side dynamic yaw branch for the pour; the transition is split
-  # into small high-clearance steps below.
+  # Compare both equivalent jaw-line yaw branches. Offline chooses the shorter
+  # rotation; execution checks both joint routes before gripping the bottle.
   grasp_orientation_rotvec: [3.14159, 0, 0]
   keep_grasp_orientation_until_tilt: false
   orientation_transition_steps: 6
-  # The jaw closing axis is an unoriented line; the negative sign selects the
-  # IK/wrist branch closer to the proven vertical grasp orientation.
+  # Physical jaw-closing axis in tool coordinates. Its sign does not force
+  # a wrist rotation direction; both equivalent yaw branches are considered.
   closing_axis_tool: [-1, 0, 0]
   grasp_offset_along_axis_m: 0.010
   approach_m: 0.10
@@ -99,15 +109,15 @@ bottle:
   restore_settle_s: 1.0
 
 dropper:
-  # Reuses the old working experiment's top-down bulb grasp semantics.
+  # Common motion template; each size role can override every parameter below.
   orientation_rotvec: [3.14159, 0, 0]
-  # Relative to the server bulb affordance center; negative Z grasps lower.
+  # Relative to the solved bulb affordance center; positive Z grasps higher.
   # Verify jaw/finger clearance to the glass bottle mouth before extracting.
-  grasp_offset_z_m: -0.010
+  grasp_offset_z_m: 0.010
   approach_m: 0.08
   extraction_m: 0.12
-  hold_position: 25
-  squeeze_position: 0
+  hold_position: 60
+  squeeze_position: 30
   # PLACEHOLDER: nominal (unshifted) bulb affordance center to pipette outlet.
   # The workflow adds grasp_offset_z_m to obtain the shifted grasp-to-tip length.
   # The old 0.08 m TCP clearance is unsafe if the tip extends farther than that.
@@ -116,6 +126,19 @@ dropper:
   squeeze_cycles: 1
   squeeze_hold_s: 0.5
   settle_s: 0.8
+
+droppers:
+  # Two neutral server instances (dropper_a/dropper_b); roles are assigned only
+  # after metric world-model PCA box volumes are compared. No color/position rule.
+  count: 2
+  minimum_size_ratio: 1.10
+  # Small = dropper 1 / phenolphthalein; large = dropper 2 / acid.
+  # Both initially reuse the existing fixed-dose motion. Independently measure
+  # tip length, extraction distance and jaw positions for the actual two pipettes.
+  small:
+    squeeze_cycles: 1
+  large:
+    squeeze_cycles: 1
 
 # CPU glass-rod endpoint service. These values define the request and hard
 # result-quality gates; measure the actual rod before setting motion.validated.
@@ -139,6 +162,9 @@ stirring_perception:
 # true value is an operator-controlled assertion and still requires empty-cup,
 # low-speed, checkpoint-by-checkpoint verification of the estimates below.
 stirring_motion:
+  # Preserve final stirring after BOTH droppers return. Set false to omit it
+  # from --stage all; --stage stirring remains an explicit independent request.
+  enabled: true
   validated: true
   # Conservative initial values for the current 197 mm rod and ~25.5 mm rim.
   # Verify each value with an empty beaker before accepting every checkpoint.

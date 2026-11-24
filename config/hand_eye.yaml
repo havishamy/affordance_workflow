@@ -1,7 +1,7 @@
 # Derived from the user's 2026-11-09 eye-on-hand recalibration.
 # Source and coordinate interpretation: hand_eye_source.yaml and ../README.md section 7.
 # Convention: p_tcp = T_parent_camera @ p_camera (homogeneous coordinates).
-# Current T_tool0_tcp is translation +0.163 m on tool0 Z.
+# Current T_tool0_tcp is translation +0.150 m on tool0 Z.
 # If tcp_offset changes: T_tcp_camera = inverse(T_tool0_tcp) @ T_tool0_camera.
 # Existing tool0-to-OpenCV-optical direction convention is retained.
 # Independent physical accuracy of the new calibration has NOT been verified.
@@ -11,5 +11,5 @@ validated: true
 T_parent_camera:
   - [-0.977186477059621, 0.14919772765147024, 0.1511510076560671, -0.04919883566908903]
   - [-0.18746366693225977, -0.9404151335851678, -0.2836842436659142, 0.11479906529552086]
-  - [0.09981965053093267, -0.30554772882093023, 0.9469301044851482, -0.14008270287842805]
+  - [0.09981965053093267, -0.30554772882093023, 0.9469301044851482, -0.12708270287842805]
   - [0.0, 0.0, 0.0, 1.0]

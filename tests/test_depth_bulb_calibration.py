@@ -102,6 +102,25 @@ class BulbCalibrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'ee_frame'):
                 load_saved_capture(capture)
 
+    def test_raw_depth_cli_preserves_xy_when_initialization_reference_is_enabled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary)/'capture'
+            self.save_capture(capture)
+            color, depth, camera, scale, source_transform = load_saved_capture(capture)
+            config = replace(self.config, table_constraint_enabled=True)
+            with patch('run_depth_bulb_grasp.ThreeStageConfig.load', return_value=config), \
+                 patch('run_depth_bulb_grasp.URRobot', side_effect=AssertionError('hardware')), \
+                 patch('run_depth_bulb_grasp._region_scores', side_effect=AssertionError('server')):
+                self.assertEqual(main(['--capture-dir', str(capture), '--grasp-z-offset', '0.010']), 0)
+            result = json.loads((capture/'raw_depth_bulb_diagnostic/result.json').read_text())
+            expected = estimate_bulb_from_raw_depth(color, depth, camera, scale, source_transform, None, .2, .5)
+            np.testing.assert_array_equal(result['source_T_base_opencv_camera'], source_transform)
+            np.testing.assert_array_equal(result['T_base_opencv_camera'], source_transform)
+            np.testing.assert_allclose(result['grasp_target_base_m'][:2], expected.surface_center_base_m[:2], atol=1e-12)
+            np.testing.assert_allclose(result['grasp_target_base_m'], expected.surface_center_base_m+[0,0,.010])
+            self.assertFalse(result['postsolve_table_transform_applied'])
+            self.assertNotIn('table_constraint', result)
+
     def test_inconsistent_tcp_and_camera_files_fail_before_motion(self):
         self.assertTrue(validate_depth_calibration(self.config).is_file())
         changed = replace(self.config, base=replace(self.config.base, robot=replace(self.config.base.robot, tcp_offset=(0, 0, .14, 0, 0, 0))))

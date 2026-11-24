@@ -8,8 +8,8 @@ robot:
   payload_cog: [0.011, -0.002, 0.052]
   # UR TCP [x,y,z,rx,ry,rz]. Used to remove the TCP offset for tool0 uploads.
   # If changed, also update local T_tcp_camera in hand_eye.yaml and revalidate motion offsets.
-  # Configured tool0 -> TCP distance: +Z, 163 mm (operator setting).
-  tcp_offset: [0, 0, 0.163, 0, 0, 0]
+  # Configured tool0 -> TCP distance: +Z, 150 mm (operator setting).
+  tcp_offset: [0, 0, 0.15, 0, 0, 0]
   position_tolerance_m: 0.005
 
 gripper:

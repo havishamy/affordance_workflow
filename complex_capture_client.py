@@ -20,14 +20,14 @@ import numpy as np
 import requests
 
 from affordance.geometry import validate_transform
+from affordance.dropper_instances import DUAL_OBJECTS, SINGLE_OBJECTS, requested_regions
+from affordance.base_table_plane import (
+    TABLE_REFERENCE_PARAMETER, validate_table_initialization_reference, validate_table_initialization_result,
+)
 
 
-DEFAULT_OBJECTS = ("wide_mouth_bottle", "beaker", "dropper")
-DEFAULT_REGIONS = {
-    "wide_mouth_bottle": ["stopper", "body_grasp"],
-    "beaker": ["mouth"],
-    "dropper": ["bulb"],
-}
+DEFAULT_OBJECTS = DUAL_OBJECTS
+DEFAULT_REGIONS = requested_regions(DEFAULT_OBJECTS)
 TERMINAL_STATES = {"completed", "failed", "interrupted"}
 
 
@@ -146,7 +146,7 @@ def validate_complex_result(payload: dict[str, Any], requested_objects: tuple[st
         if not isinstance(regions, dict):
             raise ValueError(f"objects.{name}.affordance_regions must be an object.")
 
-    for object_name, region_names in DEFAULT_REGIONS.items():
+    for object_name, region_names in requested_regions(requested_objects).items():
         if object_name not in requested_objects:
             continue
         regions = objects[object_name]["affordance_regions"]
@@ -164,8 +164,8 @@ def submit_and_wait(args: argparse.Namespace) -> int:
     capture_dir = Path(args.capture_dir).expanduser().resolve()
     paths, depth_scale, capture_id = validate_capture(capture_dir)
     requested_objects = tuple(item.strip() for item in args.objects.split(",") if item.strip())
-    if not requested_objects or "glass_rod" in requested_objects:
-        raise ValueError("This capture requests wide_mouth_bottle,beaker,dropper and contains no glass_rod.")
+    if len(set(requested_objects)) != len(requested_objects) or set(requested_objects) not in (set(DUAL_OBJECTS), set(SINGLE_OBJECTS)):
+        raise ValueError("Request either wide_mouth_bottle,beaker,dropper_a,dropper_b or the explicit legacy wide_mouth_bottle,beaker,dropper set.")
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else capture_dir / "complex_server_result"
     output_dir.mkdir(parents=True, exist_ok=True)
     headers = _headers(args.token)
@@ -174,8 +174,18 @@ def submit_and_wait(args: argparse.Namespace) -> int:
         "depth_scale": repr(depth_scale),
         "capture_id": capture_id,
         "requested_objects": json.dumps(requested_objects, separators=(",", ":")),
-        "requested_affordance_regions": json.dumps(DEFAULT_REGIONS, separators=(",", ":")),
+        "requested_affordance_regions": json.dumps(requested_regions(requested_objects), separators=(",", ":")),
     }
+    reference = getattr(args, "table_plane_reference", None)
+    if isinstance(reference, (str, Path)):
+        reference = _load_json(Path(reference).expanduser().resolve())
+    if reference is not None:
+        data[TABLE_REFERENCE_PARAMETER] = json.dumps(validate_table_initialization_reference(reference), separators=(",", ":"))
+    if set(requested_objects) == set(DUAL_OBJECTS):
+        ratio = float(getattr(args, "minimum_dropper_size_ratio", 1.10))
+        if not math.isfinite(ratio) or ratio <= 1:
+            raise ValueError("minimum dropper size ratio must be finite and greater than 1.")
+        data["minimum_dropper_size_ratio"] = repr(ratio)
     if args.gpu is not None:
         data["gpu"] = str(args.gpu)
     print(f"Validated capture {capture_id}; uploading to {jobs_url}", flush=True)
@@ -241,6 +251,9 @@ def submit_and_wait(args: argparse.Namespace) -> int:
     ))
     _write_json(output_dir / "result.json", result)
     artifacts = validate_complex_result(result, requested_objects)
+    if reference is not None:
+        validate_table_initialization_result(result, requested_objects, reference)
+        print("Server confirmed base z=0 pose initialization: Z translation only; XY, rotation and scale preserved.", flush=True)
 
     final_zip = output_dir / f"complex_{job_id}_{args.scope}.zip"
     partial_zip = final_zip.with_suffix(".zip.part")
@@ -291,6 +304,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run")
     run.add_argument("--capture-dir", required=True)
     run.add_argument("--objects", default=",".join(DEFAULT_OBJECTS))
+    run.add_argument("--minimum-dropper-size-ratio", type=float, default=1.10)
+    run.add_argument("--table-plane-reference", metavar="JSON_FILE", help="Optional base z=0 initialization-reference JSON; requires server confirmation")
     run.add_argument("--output-dir")
     run.add_argument("--gpu", type=int)
     run.add_argument("--scope", choices=["results", "all"], default="results")

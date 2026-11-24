@@ -11,6 +11,7 @@ import numpy as np
 
 from .geometry import validate_transform
 from .three_stage_result import _read_ply_xyz
+from .dropper_instances import BASE_OBJECTS, DROPPER_IDS, rank_dropper_models
 
 
 DEPTH_COLOR = (170, 170, 170)
@@ -18,12 +19,16 @@ MODEL_COLORS = {
     "wide_mouth_bottle": (255, 60, 60),
     "beaker": (60, 120, 255),
     "dropper": (255, 60, 220),
+    "dropper_a": (255, 140, 40),
+    "dropper_b": (60, 220, 130),
 }
 SOURCE_IDS = {
     "depth": 0,
     "wide_mouth_bottle": 1,
     "beaker": 2,
     "dropper": 3,
+    "dropper_a": 4,
+    "dropper_b": 5,
 }
 
 
@@ -301,7 +306,9 @@ def export_alignment_ply(
     objects = result.get("objects")
     if not isinstance(objects, dict):
         raise ValueError("Result objects must be a mapping.")
-    for name in ("wide_mouth_bottle", "beaker", "dropper"):
+    names = (*BASE_OBJECTS, *DROPPER_IDS) if any(name in objects for name in DROPPER_IDS) else (*BASE_OBJECTS, "dropper")
+    metric_models = {}
+    for name in names:
         obj = objects.get(name)
         if not isinstance(obj, dict):
             raise ValueError(f"Result is missing object {name}.")
@@ -309,6 +316,7 @@ def export_alignment_ply(
         if not isinstance(artifact, str) or Path(artifact).is_absolute() or ".." in Path(artifact).parts:
             raise ValueError(f"{name} has an unsafe model artifact path.")
         model_points = _read_ply_xyz(result_dir / artifact)
+        metric_models[name] = model_points
         model_counts[name] = len(model_points)
         components.append((f"fitted_{name}", model_points, MODEL_COLORS[name]))
         point_blocks.append(model_points)
@@ -318,13 +326,21 @@ def export_alignment_ply(
     all_points = np.vstack(point_blocks)
     all_colors = np.vstack(color_blocks)
     all_sources = np.concatenate(source_blocks)
+    size_ranking = None
+    if "dropper_a" in metric_models:
+        try:
+            size_ranking = rank_dropper_models(metric_models)
+        except ValueError as exc:
+            # A diagnostic export remains useful when sizes cannot be ranked;
+            # this does not relax load_scene's execution-time role validation.
+            size_ranking = {"status": "unresolved", "reason": str(exc)}
     comments = [
         "coordinates: UR base/world, meters",
         f"capture_id: {capture_dir.name}",
         "source_id 0: observed aligned depth, gray rgb=170,170,170",
         "source_id 1: fitted wide-mouth-bottle model, red rgb=255,60,60",
         "source_id 2: fitted beaker model, blue rgb=60,120,255",
-        "source_id 3: fitted dropper model, magenta rgb=255,60,220",
+        *[f"source_id {SOURCE_IDS[name]}: fitted {name} model, rgb={','.join(map(str,MODEL_COLORS[name]))}" for name in names if name not in BASE_OBJECTS],
         "depth projection uses server pipeline T_world_opencv_camera",
     ]
     write_colored_ply(output_path, all_points, all_colors, all_sources, comments)
@@ -355,6 +371,7 @@ def export_alignment_ply(
             }
             for name in model_counts
         },
+        "dropper_size_ranking": size_ranking,
         "transform": {
             "source": "pipeline.log calibration_validation.T_world_opencv_camera",
             "T_world_opencv_camera": server_transform.tolist(),

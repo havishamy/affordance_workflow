@@ -1,0 +1,16 @@
+{
+  "frame": "base",
+  "units": "meters",
+  "normal": [
+    0,
+    0,
+    1
+  ],
+  "offset_m": 0.0,
+  "apply_stage": "pose_initialization",
+  "allowed_adjustment": "z_translation_only",
+  "preserve_object_xy": true,
+  "preserve_object_rotation": true,
+  "preserve_object_scale": true,
+  "postsolve_scene_transform": false
+}

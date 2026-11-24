@@ -10,6 +10,7 @@ import yaml
 
 from .config import AppConfig
 from .target_geometry import GraspCenterConfig, OpeningConfig
+from .dropper_instances import DUAL_CHEMISTRY_STAGES, LEGACY_CHEMISTRY_STAGES, scene_objects
 
 
 def _values(raw: Any, count: int, name: str) -> tuple[float, ...]:
@@ -97,6 +98,19 @@ class DropperStageConfig:
     settle_s: float
 
 
+def _dropper_config(raw: dict) -> DropperStageConfig:
+    return DropperStageConfig(
+        orientation_rotvec=_values(raw["orientation_rotvec"], 3, "dropper.orientation_rotvec"),
+        grasp_offset_z_m=float(raw.get("grasp_offset_z_m", 0.0)),
+        approach_m=float(raw.get("approach_m", 0.08)), extraction_m=float(raw.get("extraction_m", 0.12)),
+        hold_position=int(raw["hold_position"]), squeeze_position=int(raw["squeeze_position"]),
+        tip_below_bulb_m=float(raw["tip_below_bulb_m"]),
+        tip_clearance_above_beaker_m=float(raw["tip_clearance_above_beaker_m"]),
+        squeeze_cycles=int(raw.get("squeeze_cycles", 1)), squeeze_hold_s=float(raw.get("squeeze_hold_s", 0.5)),
+        settle_s=float(raw.get("settle_s", 0.8)),
+    )
+
+
 @dataclass(frozen=True)
 class ObservationConfig:
     enabled: int
@@ -160,6 +174,42 @@ class ThreeStageConfig:
     stirring_motion: StirringMotionConfig
     grasp_center: GraspCenterConfig = GraspCenterConfig()
     beaker_opening: OpeningConfig = OpeningConfig()
+    dropper_count: int = 1
+    dropper_small: DropperStageConfig | None = None
+    dropper_large: DropperStageConfig | None = None
+    dropper_minimum_size_ratio: float = 1.10
+    stirring_enabled: bool = True
+    table_constraint_enabled: bool = False
+
+    @property
+    def object_names(self) -> tuple[str, ...]:
+        return scene_objects(self.dropper_count)
+
+    @property
+    def chemistry_stages(self) -> tuple[str, ...]:
+        return DUAL_CHEMISTRY_STAGES if self.dropper_count == 2 else LEGACY_CHEMISTRY_STAGES
+
+    def select_chemistry_stages(self, name: str) -> tuple[str, ...]:
+        aliases = {"dropper_1": "dropper_small", "dropper_2": "dropper_large"}
+        name = aliases.get(name, name)
+        if name == "all":
+            return self.chemistry_stages
+        if name == "stirring":
+            return ()
+        if name == "dropper" and self.dropper_count == 2:
+            return ("dropper_small", "dropper_large")
+        if name not in self.chemistry_stages:
+            raise ValueError(f"Stage {name!r} is unavailable with dropper_count={self.dropper_count}.")
+        return (name,)
+
+    def dropper_motion(self, role: str) -> DropperStageConfig:
+        if role == "small" and self.dropper_count == 2:
+            return self.dropper_small or self.dropper
+        if role == "large" and self.dropper_count == 2:
+            return self.dropper_large or self.dropper
+        if role == "single" and self.dropper_count == 1:
+            return self.dropper
+        raise ValueError(f"Invalid dropper role {role!r} for count={self.dropper_count}.")
 
     @classmethod
     def load(cls, path: str | Path) -> "ThreeStageConfig":
@@ -193,10 +243,19 @@ class ThreeStageConfig:
         stopper = raw["stopper"]
         bottle = raw["bottle"]
         dropper = raw["dropper"]
+        droppers = raw.get("droppers", {})
         stirring_perception = raw["stirring_perception"]
         stirring_motion = raw["stirring_motion"]
         grasp_center = raw.get("grasp_center", {})
         beaker_opening = raw.get("beaker_opening", {})
+        table_constraint = raw.get("table_constraint", {})
+        if table_constraint.get("enabled", False) and (
+            table_constraint.get("frame", "base") != "base"
+            or float(table_constraint.get("height_m", 0.0)) != 0.0
+            or table_constraint.get("stage", "initialization_only") != "initialization_only"
+            or table_constraint.get("preserve_xy", True) is not True
+        ):
+            raise ValueError("Table reference must be base z=0 at initialization only, preserving object XY.")
         result = cls(
             base=base,
             capture_dir=resolve(raw["capture_dir"]),
@@ -204,6 +263,12 @@ class ThreeStageConfig:
             physical_execution_validated=bool(raw.get("physical_execution_validated", False)),
             transit_z_m=float(raw.get("transit_z_m", base.motion.transit_z_m)),
             orientation_tolerance_rad=float(raw.get("orientation_tolerance_rad", 0.05)),
+            dropper_count=int(droppers.get("count", 1)),
+            dropper_small=_dropper_config({**dropper, **droppers.get("small", {})}),
+            dropper_large=_dropper_config({**dropper, **droppers.get("large", {})}),
+            dropper_minimum_size_ratio=float(droppers.get("minimum_size_ratio", 1.10)),
+            stirring_enabled=bool(stirring_motion.get("enabled", True)),
+            table_constraint_enabled=bool(table_constraint.get("enabled", False)),
             grasp_center=GraspCenterConfig(
                 bandwidth_m=float(grasp_center.get("bandwidth_m", 0.003)),
                 bin_width_m=float(grasp_center.get("bin_width_m", 0.0005)),
@@ -275,19 +340,7 @@ class ThreeStageConfig:
                 hold_s=float(bottle.get("hold_s", 2.0)),
                 restore_settle_s=float(bottle.get("restore_settle_s", 1.0)),
             ),
-            dropper=DropperStageConfig(
-                orientation_rotvec=_values(dropper["orientation_rotvec"], 3, "dropper.orientation_rotvec"),
-                grasp_offset_z_m=float(dropper.get("grasp_offset_z_m", 0.0)),
-                approach_m=float(dropper.get("approach_m", 0.08)),
-                extraction_m=float(dropper.get("extraction_m", 0.12)),
-                hold_position=int(dropper["hold_position"]),
-                squeeze_position=int(dropper["squeeze_position"]),
-                tip_below_bulb_m=float(dropper["tip_below_bulb_m"]),
-                tip_clearance_above_beaker_m=float(dropper["tip_clearance_above_beaker_m"]),
-                squeeze_cycles=int(dropper.get("squeeze_cycles", 1)),
-                squeeze_hold_s=float(dropper.get("squeeze_hold_s", 0.5)),
-                settle_s=float(dropper.get("settle_s", 0.8)),
-            ),
+            dropper=_dropper_config(dropper),
             stirring_perception=StirringPerceptionConfig(
                 rod_radius_m=float(stirring_perception.get("rod_radius_m", 0.0025)),
                 grasp_inset_m=float(stirring_perception.get("grasp_inset_m", 0.025)),
@@ -361,6 +414,21 @@ class ThreeStageConfig:
         return result
 
     def validate(self) -> None:
+        scene_objects(self.dropper_count)
+        if not math.isfinite(self.dropper_minimum_size_ratio) or self.dropper_minimum_size_ratio <= 1:
+            raise ValueError("droppers.minimum_size_ratio must be finite and greater than 1.")
+        for role in (("small", "large") if self.dropper_count == 2 else ("single",)):
+            motion = self.dropper_motion(role)
+            if motion.squeeze_cycles < 1 or motion.tip_below_bulb_m + motion.grasp_offset_z_m <= 0:
+                raise ValueError(f"{role} dropper needs positive squeeze cycles and effective tip length.")
+            for key in ("approach_m", "extraction_m", "tip_below_bulb_m", "tip_clearance_above_beaker_m", "squeeze_hold_s", "settle_s"):
+                value = getattr(motion, key)
+                if not math.isfinite(value) or (value < 0 if key == "settle_s" else value <= 0):
+                    raise ValueError(f"Invalid {role} dropper {key}.")
+            if not math.isfinite(motion.grasp_offset_z_m):
+                raise ValueError(f"Invalid {role} dropper grasp offset.")
+            if not 0 <= motion.squeeze_position < motion.hold_position < self.base.gripper.open_position:
+                raise ValueError(f"{role} dropper requires 0 <= squeeze < hold < open_position.")
         self.grasp_center.validate()
         self.beaker_opening.validate()
         # Observation mode creates fresh capture/result directories. Do not

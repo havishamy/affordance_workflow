@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,8 @@ import numpy as np
 from .geometry import validate_transform
 from .three_stage_config import ThreeStageConfig
 from .target_geometry import opening_from_model, unit_axis, weighted_modal_center
+from .dropper_instances import rank_dropper_models
+from .base_table_plane import validate_table_initialization_result
 
 LOG = logging.getLogger(__name__)
 
@@ -136,6 +138,17 @@ class SceneGeometry:
     quality_report: dict[str, Any]
     source_job_id: str
     source_capture_id: str
+    dropper_bulb_grasps: dict[str, np.ndarray] = field(default_factory=dict)
+    dropper_instance_ids: dict[str, str] = field(default_factory=dict)
+    dropper_size_ranking: dict[str, Any] = field(default_factory=dict)
+    model_artifacts: dict[str, str] = field(default_factory=dict)
+
+    def dropper_grasp(self, role: str) -> np.ndarray:
+        if role == "single" and not self.dropper_instance_ids:
+            return self.dropper_bulb_grasp
+        if role not in self.dropper_bulb_grasps:
+            raise ValueError(f"Scene has no independent {role} dropper.")
+        return self.dropper_bulb_grasps[role]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +161,10 @@ class SceneGeometry:
             "beaker_mouth_center_base_m": self.beaker_mouth_center.tolist(),
             "beaker_inner_radius_estimate_m": self.beaker_inner_radius_estimate_m,
             "dropper_bulb_grasp_base_m": self.dropper_bulb_grasp.tolist(),
+            "dropper_bulb_grasps_base_m": {k: v.tolist() for k, v in self.dropper_bulb_grasps.items()},
+            "dropper_instance_ids": self.dropper_instance_ids,
+            "dropper_size_ranking": self.dropper_size_ranking,
+            "model_artifacts": self.model_artifacts,
             "quality_report": self.quality_report,
             "beaker_opening": self.quality_report.get("beaker_opening"),
             "method_note": "Grasps use axial-mode local weighting; receiving target is the hollow rim-plane opening, not cup-wall points. Mouth/tip offsets remain physical configuration.",
@@ -174,10 +191,13 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
         raise ValueError("Server calibration must report ee_frame=tool0.")
     if result.get("calibration", {}).get("world_frame") != "base":
         raise ValueError("Server calibration must report world_frame=base.")
-    required_names = ("wide_mouth_bottle", "beaker", "dropper")
+    required_names = config.object_names
+    if result.get("table_plane_reference") is not None:
+        validate_table_initialization_result(result, required_names)
     objects = result.get("objects")
     if not isinstance(objects, dict) or any(name not in objects for name in required_names):
-        raise ValueError("Result is missing a required object.")
+        missing = [name for name in required_names if not isinstance(objects, dict) or name not in objects]
+        raise ValueError(f"Result is missing required objects {missing}. Dual-dropper mode requires new dropper_a/dropper_b reconstruction; old single-dropper results require explicit droppers.count=1.")
 
     model_clouds: dict[str, np.ndarray] = {}
     model_quality: dict[str, Any] = {}
@@ -219,12 +239,24 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
             "canonical_to_world_mesh_max_error_m": maximum_error,
         }
 
+    ranking = rank_dropper_models(model_clouds, config.dropper_minimum_size_ratio) if config.dropper_count == 2 else {}
+    if ranking:
+        declared = result.get("dropper_size_ranking")
+        if declared is not None and (
+            not isinstance(declared, dict) or declared.get("method") != ranking["method"]
+            or declared.get("small_id") != ranking["small_id"] or declared.get("large_id") != ranking["large_id"]
+        ):
+            raise ValueError("Server/local metric dropper size ranking disagrees; refusing role assignment.")
+    dropper_ids = {"small": ranking["small_id"], "large": ranking["large_id"]} if ranking else {"single": "dropper"}
+
     region_paths = {
         "stopper": ("wide_mouth_bottle", "stopper", config.quality.maximum_stopper_rms_m),
         "body_grasp": ("wide_mouth_bottle", "body_grasp", config.quality.maximum_body_rms_m),
         "beaker_mouth": ("beaker", "mouth", config.quality.maximum_beaker_mouth_rms_m),
-        "bulb": ("dropper", "bulb", config.quality.maximum_bulb_rms_m),
     }
+    for role, object_name in dropper_ids.items():
+        alias = "bulb" if role == "single" else f"bulb_{role}"
+        region_paths[alias] = (object_name, "bulb", config.quality.maximum_bulb_rms_m)
     regions: dict[str, np.ndarray] = {}
     region_scores: dict[str, np.ndarray | None] = {}
     region_quality: dict[str, Any] = {}
@@ -254,6 +286,7 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
         metrics = _read_json(metric_path) if metric_path.is_file() or not receiving_surface else {}
         if not receiving_surface and metrics.get("valid") is not True:
             warnings.append(f"{alias} server affordance quality flag is not valid; inspect before any motion.")
+        scores = _region_scores(root, region, points) if alias != "beaker_mouth" else None
         rms = _rms_radius(points) if len(points) else None
         if not receiving_surface and rms is not None and rms > maximum_rms:
             warnings.append(
@@ -261,8 +294,9 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
                 f"{maximum_rms:.4f} m; inspect the region overlay."
             )
         regions[alias] = points
-        region_scores[alias] = _region_scores(root, region, points) if alias != "beaker_mouth" else None
+        region_scores[alias] = scores
         region_quality[alias] = {
+            "source_object": object_name,
             "points": len(points), "rms_radius_m": rms,
             "argmax_uv": metrics.get("argmax_uv"), "target_peak": metrics.get("target_peak"),
         }
@@ -277,7 +311,9 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
 
     bounds = (config.base.motion.workspace_min, config.base.motion.workspace_max)
     centers, center_reports = {}, {}
-    for alias, name in (("stopper", "wide_mouth_bottle"), ("body_grasp", "wide_mouth_bottle"), ("bulb", "dropper")):
+    grasp_sources = [("stopper", "wide_mouth_bottle"), ("body_grasp", "wide_mouth_bottle")]
+    grasp_sources.extend(("bulb" if role == "single" else f"bulb_{role}", name) for role, name in dropper_ids.items())
+    for alias, name in grasp_sources:
         centers[alias], center_reports[alias] = weighted_modal_center(
             regions[alias], region_scores[alias], object_axis(name),
             config=config.grasp_center, bounds=bounds,
@@ -327,13 +363,17 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
     model_xy = np.median(beaker_model[:, :2], axis=0)
     if np.linalg.norm(beaker_center_xy - model_xy) > 0.015:
         warnings.append("Fitted beaker mouth center is over 15 mm from the reconstructed beaker center.")
-    bulb = centers["bulb"]
+    bulb_centers = {role: centers["bulb" if role == "single" else f"bulb_{role}"] for role in dropper_ids}
+    # Legacy field remains a read-only alias for compatibility; dual-stage
+    # planning always requests an explicit small/large role instead.
+    bulb = bulb_centers["small"] if ranking else bulb_centers["single"]
     bottle_mouth = stopper_grasp + axis * config.bottle.stopper_center_to_mouth_m
     report = {
         "models": model_quality,
         "regions": region_quality,
         "grasp_centers": center_reports,
         "beaker_opening": opening,
+        "dropper_size_ranking": ranking,
         "stopper_body_center_distance_m": separation_m,
         "stopper_body_top_region_iou": separation.get("top_region_iou"),
         "beaker_circle_fit": {
@@ -345,7 +385,13 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
         },
         "canonical_model_stability": "not guaranteed by server; no cross-capture canonical anchors used",
         "warnings": warnings,
+        "table_initialization_reference": {
+            "requested_for_new_solve": config.table_constraint_enabled,
+            "server_reported_reference": result.get("table_plane_reference"),
+            "postsolve_scene_transform_applied": False,
+        },
     }
+    model_artifacts = {name: objects[name]["model_points_world_artifact"] for name in required_names}
     for warning in warnings:
         LOG.warning("Scene quality advisory: %s", warning)
     return SceneGeometry(
@@ -359,4 +405,8 @@ def load_scene(config: ThreeStageConfig) -> SceneGeometry:
         quality_report=report,
         source_job_id=str(result["job_id"]),
         source_capture_id=capture_id,
+        dropper_bulb_grasps=bulb_centers,
+        dropper_instance_ids=dropper_ids if ranking else {},
+        dropper_size_ranking=ranking,
+        model_artifacts=model_artifacts,
     )

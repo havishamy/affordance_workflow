@@ -2,13 +2,13 @@
 
 本目录包含本地 RGB-D 采集、服务器 affordance 定位、UR 路径规划和可选真机执行。`world` 统一表示 UR `base`，默认仅采集/定位/规划；只有显式传入 `--execute`，且配置闸门和人工确认均通过后，程序才会控制机械臂或夹爪。
 
-当前推荐入口是 `run_three_stage_demo.py`。文件名为了兼容历史命令仍叫 three-stage，实际已经包含四个阶段：拔塞、倾倒、滴液和玻璃棒搅拌。
+当前推荐入口是 `run_three_stage_demo.py`。文件名为兼容历史命令保留，默认顺序为：拔塞、倒碱、小滴瓶滴定、大滴瓶滴定，以及原有可选的最终玻璃棒搅拌。暂不根据颜色决定终点。
 
 ## 1. 入口与适用范围
 
 | 入口 | 用途 | 默认是否运动 |
 |---|---|---|
-| `run_three_stage_demo.py` | 推荐的四阶段流程；可重新观察或复用已有结果 | `--observe 0` 不运动；`--observe 1` 会移动到观察位；阶段动作还需 `--execute` |
+| `run_three_stage_demo.py` | 推荐的双滴瓶流程；可重新观察或复用已有结果 | `--observe 0` 不运动；`--observe 1` 会移动到观察位；阶段动作还需 `--execute` |
 | `run_titration.py` | 旧的两目标滴管/烧杯滴定流程 | 默认只采集、定位和规划；`--execute` 才执行 |
 | `run_complex_demo.py` | 独立的早期四阶段实验/格式验证 | 默认规划；当前 `physical_accuracy_validated: false` 阻止真机执行 |
 | `run_depth_bulb_grasp.py` | 原始深度胶头定位与可选夹持诊断 | 默认离线；`--live` 采集，`--observe` 会移动，`--live --execute` 抓取闭爪 |
@@ -27,7 +27,7 @@ python -m pip install -r requirements.txt
 `pyDHgripper` 需要复用 `ur_data_collection` 中已能工作的安装。主要配置：
 
 - `config/config.yaml`：UR IP、TCP、负载、夹爪串口、相机、服务器和旧滴定运动参数；
-- `config/three_stage_demo.yaml`：推荐四阶段流程、观察模式、各阶段运动和质量阈值；
+- `config/three_stage_demo.yaml`：双滴瓶流程、观察模式、各阶段运动和质量阈值；
 - `config/complex_demo.yaml`：独立早期复杂流程；
 - `config/T_ee_cam.json`、`config/hand_eye.yaml`、`config/hand_eye_source.yaml`：服务器和本地使用的手眼标定及来源记录。
 
@@ -104,9 +104,30 @@ captures/<capture_id>/
 
 所有结果必须使用有限的米制 `world/base` 坐标。复杂接口返回模型 ID、pose/scale、世界点云和已有 affordance 区域点集；它不负责猜测液面、瓶口轴、滴管尖端、抓取姿态、倾倒量、滴数或机器人路径。模型 ID 和 canonical 坐标若不能跨运行稳定，本地几何先验就不能安全复用。
 
-## 4. 推荐四阶段流程
+## 4. 推荐双滴瓶流程
+
+### 双滴瓶数据契约与按大小分配
+
+默认 `droppers.count: 2`，初始请求四个独立实例：`wide_mouth_bottle`、`beaker`、`dropper_a`、`dropper_b`。a/b 只是服务器实例 ID，没有大小含义。两个实例分别恢复位姿和米制尺度后，本地使用各自 `model_points_world_artifact` 的完整模型顶点计算稳健 PCA 包围盒：减去均值、协方差特征分解、转入主轴坐标、每轴取 1%–99% 范围，三轴长度乘积作为大小代理。比较的不是图片大小、文件名、颜色、位置或单独的 `scale` 数值，也不是测得的液体容量。
+
+体积较小实例固定为滴瓶1/酚酞，较大为滴瓶2/酸液。`droppers.minimum_size_ratio` 默认要求大/小体积比至少 1.10；大小不明确、缺失任一实例或两份模型重复时会停止，不按其他信息猜测。`SceneGeometry`、离线计划和执行事件保存角色→源实例映射及两个物理尺寸。
+
+`dropper` 是公共动作参数模板，`droppers.small`、`droppers.large` 分别覆盖任意参数。两次操作复用同一个取管→固定次数挤压→归回各自原瓶的函数；滴管长度、抽出距离、抓取偏移和夹爪位置可以独立配置。当前默认都复用原动作一次挤压，不新增颜色控制或吸液步骤；一次挤压不代表实测一滴。
+
+服务器尚未升级时，旧单滴瓶缓存不能用于默认双滴瓶流程。服务器修改要求见 `SERVER_DUAL_DROPPER_PROMPT.txt`，更新后必须采集包含两个滴瓶的新结果。旧三物体实验可显式传入 `--dropper-count 1`（或在配置中设置 `droppers.count: 1`）：请求 `wide_mouth_bottle,beaker,dropper`，化学阶段恢复为拔塞、倒碱、单滴瓶滴定，最终搅拌仍由原配置控制。程序不会把一个旧滴瓶复制成两个。`run_complex_demo.py` 是旧 canonical-prior 单滴瓶入口，不接收双实例结果。
+
+```bash
+# 旧三物体实验：重新观测并执行，自动通过人工确认点。
+python run_three_stage_demo.py --dropper-count 1 --observe 1 --stage all --execute --yes
+```
+
+`--observe 0/1` 仅切换是否重新观测，不选择实验模式。不传 `--dropper-count` 时沿用 YAML 的 `droppers.count`；启动时会打印配置路径、请求物体与所选阶段。
 
 ### 4.1 只复用本地结果并规划
+
+倾倒前的朝向选择会同时考虑夹爪闭合轴线的两个等价方向。离线预览选择从抓取姿态出发旋转角较小的方向；实际执行在靠近、夹持广口瓶之前，用实时关节位置作为种子，对两条完整瓶子路线做连续逆解检查。笛卡尔采样间隔不超过 10 mm、姿态间隔不超过 5°，检查控制器关节安全限制并拒绝逆解分支突跳；在通过检查的路线中选择累计关节转动较小的一条。两条都不可行时中止，不会先夹起瓶子再尝试。
+
+`plan_bottle.json` 的 `metadata` 记录两个等价旋转角、有效/拒绝分支和关节预检结果；瓶子运动事件记录运动前后的关节值。有限采样和控制器逆解不等于完整碰撞或奇异性证明，控制器原有保护仍保留。
 
 ```bash
 python run_three_stage_demo.py --observe 0
@@ -123,7 +144,7 @@ python run_three_stage_demo.py --observe 1
 
 模式 `1` 会连接 UR，移动到配置的参考观察位，采集 RGB-D，提交 `/v1/complex-demo/jobs`，下载并检查结果，然后规划。即使没有 `--execute`，观察移动也是真实机械臂运动。
 
-初始画面必须同时包含瓶塞、瓶身、烧杯口和胶头。瓶塞已经移走后不要重新运行完整初始场景观察。
+初始画面必须同时包含瓶塞、瓶身、烧杯口和两只滴瓶的胶头。瓶塞已经移走后不要重新运行完整初始场景观察。
 
 ### 4.3 分阶段真机验证
 
@@ -132,18 +153,21 @@ python run_three_stage_demo.py --observe 1
 ```bash
 python run_three_stage_demo.py --observe 0 --execute --stage stopper
 python run_three_stage_demo.py --observe 0 --execute --stage bottle
-python run_three_stage_demo.py --observe 0 --execute --stage dropper
+python run_three_stage_demo.py --observe 0 --execute --stage dropper_small
+python run_three_stage_demo.py --observe 0 --execute --stage dropper_large
 ```
+
+`--stage dropper` 顺序执行小、大两个滴瓶；`--stage dropper_1` 和 `--stage dropper_2` 分别是小、大的别名。每只滴管先放回自己的原瓶再开始下一只，阶段名和日志分别为 `dropper_small`、`dropper_large`。
 
 程序从当前实际 TCP 位姿重新规划，第一段通常是原地升至安全转运高度；当前位置正上方必须无障碍。每阶段和关键动作要求键入指定确认文本，其他输入会停止。停止或异常后程序不会自动松爪。
 
-四阶段完整命令：
+包含两个滴瓶及可选搅拌的完整命令：
 
 ```bash
 python run_three_stage_demo.py --observe 1 --execute --stage all
 ```
 
-只有前三阶段已分别验证后才应使用完整命令。
+各化学阶段分别验证后再使用完整命令。`stirring_motion.enabled: true` 保留原有最终搅拌，执行时会检查其 validated 参数；设为 false 时 `--stage all` 在两次滴定归位后结束，不请求玻璃棒服务器。
 
 所有现场检查已经完成、需要连续执行且不等待任何键盘输入时，显式增加 `--yes`：
 
@@ -155,7 +179,7 @@ python run_three_stage_demo.py --observe 0 --execute --stage all --yes
 
 ### 4.4 玻璃棒搅拌
 
-玻璃棒不能复用初始复杂场景图像。滴管归位后需要重新观察：
+玻璃棒不能复用初始复杂场景图像。两只滴管均归位后需要重新观察：
 
 ```bash
 python run_three_stage_demo.py --observe 0 --stage stirring --stir-observe 1
@@ -256,6 +280,8 @@ python run_depth_bulb_grasp.py --live --observe --execute
 
 该模式先移动到固定观察位，再重新采集、定位并接近胶头；在预抓取高度和抓取高度分别要求确认后才闭爪。追加 `--yes` 可自动通过确认点。它不会抽出、转运或自动松爪。用于标定检查时，默认 `--grasp-z-offset=0`，不会隐含下降 10 mm；需要侧面夹持补偿时必须显式传入，例如 `--grasp-z-offset -0.010`，此时最终目标已包含人为偏移。
 
+纯深度入口直接使用原始手眼坐标链，不应用桌面转正或 XY 平移；`table_constraint.enabled` 只用于服务器初始化请求，不改变此入口的坐标。多个面积相近的红/粉胶头须用 `--roi` 指定其中一个；此入口仅通过 `--grasp-z-offset` 明确添加 Z 偏移，模型流程的 `dropper.grasp_offset_z_m` 不会自动继承。
+
 诊断目录包含遮罩叠加图（绿色点为加权中心的投影）、实测胶头点云 `raw_depth_bulb_points_world.ply`、记录相机/世界坐标、当前手眼矩阵及哈希、TCP 偏移的 `result.json`。执行时另存 `grasp_plan.json` 与 `grasp_completed.json`。控制器实际 TCP 接近命令目标，只能说明运动到位；手眼标定、物理 TCP、深度误差及可见表面到体积中心的差异，仍需结合实际夹指落点判断。当前 TCP 配置是 150 mm，脚本不会自动改动它。
 
 只有显式使用离线选项 `--compare-server` 才额外读取模型胶头区域做对照；默认纯深度路径不受服务器类别互换影响。启动时会检查 `hand_eye.yaml`、`T_ee_cam.json` 与 TCP 偏移是否数值一致。
@@ -308,6 +334,27 @@ p_base = T_base_tool0 * T_ee_cam * p_opencv_camera
 
 修改 TCP、相机安装、内参、marker 尺寸或标定文件后，必须用多个静止视角和可独立测得 base 坐标的固定标志点重新验证。服务器标定文件不会由本地客户端自动上传；两端版本需要人工核对。
 
+### 桌面与 base 齐平：仅作为位姿初始化参考
+
+```yaml
+table_constraint:
+  enabled: true
+  stage: initialization_only
+  frame: base
+  height_m: 0.0
+  preserve_xy: true
+```
+
+这个设置只向服务器请求初始化参考：已知桌面为 `base z=0`，仅允许初始化的 Z 平移调整，保留物体 XY、旋转和尺度。客户端不再对已解算模型、affordance、抓取点、搅拌坐标或相机变换应用桌面旋转、平移、缩放等后处理。读取历史结果时也不补做任何桌面变换；原始标定和坐标链保持不变。
+
+新观测开始前，客户端读取 OpenAPI，检查 `/v1/complex-demo/jobs` 是否声明 `table_plane_reference` 上传参数。服务器不支持时，在机械臂移动前中止并明确报错，不能用客户端转正或静默忽略参数代替。2026-11-24 检查的实际服务器尚未声明此字段，初始化参考目前需要服务端增加支持后才能生效。旧结果的规划会注明源结果实际报告的参考，不伪称旧数据已使用新初始化。
+
+`table_plane_reference` 的 JSON 契约由 `affordance/base_table_plane.py` 给出，包含 `apply_stage: pose_initialization`、`allowed_adjustment: z_translation_only`、`preserve_object_xy: true`、`preserve_object_rotation: true`、`preserve_object_scale: true`、`postsolve_scene_transform: false`。原始 `world_ee` 上传保持实测值，不通过伪造机械臂位姿实现桌面约束。
+
+服务端修改的完整说明见 `SERVER_BASE_TABLE_INITIALIZATION_PROMPT.txt`，可复制的独立 NumPy 初始化实现见 `server_base_table_reference.py`，精确请求样例见 `config/table_plane_reference.json`。本地会检查服务端 `result.json` 顶层 `table_plane_reference.applied=true` 及每个请求物体的初始化前后矩阵、尺度和支撑 Z 审计，拒绝缺回执、改 XY/旋转/尺度或未对齐支撑点的结果；完整 ZIP 中的回执必须与 API 一致。
+
+旧的 `trial_base_table_plane.py` 已改为仅导出初始化参考 JSON，不再旋转场景。过去生成的 `base_table_plane_trial/`、`local_table_constraint/`、`local_three_stage_plan_table_constrained.json` 是旧试验产物，不会被当前规划或执行读取。
+
 ## 8. 安全边界
 
 当前实现仍是开环实验系统：
@@ -342,13 +389,13 @@ python run_three_stage_demo.py --observe 0 --stage all
 
 ### 深度与拟合模型的彩色 PLY 对齐检查
 
-将最新观测的完整原始深度点云与服务器拟合的三个 world 模型合并为一个 PLY：
+将最新观测的完整原始深度点云与服务器拟合的全部 world 模型合并为一个 PLY（双滴瓶为四个模型）：
 
 ```bash
 python export_alignment_ply.py
 ```
 
-默认颜色：深度灰色、广口瓶红色、烧杯蓝色、滴瓶洋红色。输出位于最新结果的
+默认颜色：深度灰色、广口瓶红色、烧杯蓝色、dropper_a 橙色、dropper_b 绿色；旧单滴瓶仍用洋红色。预览颜色只标识实例，不参与大小或试剂角色判断。输出位于最新结果的
 `diagnostics/depth_model_alignment_world.ply`，并额外生成更适合 VS Code 3D 预览器的同名 `.glb`。同时生成同名 JSON，记录点数、颜色、坐标系和服务器实际使用的相机世界变换。可用 `--capture-dir` 与 `--result-dir` 指定其他成对结果；两者必须属于同一次采集。
 
 无硬件单元测试：
